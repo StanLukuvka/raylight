@@ -854,7 +854,11 @@ class RayUNETLoader:
         # `load_after` is an execution-only dependency. Keeping it in this
         # signature lets memory-constrained workflows finish conditioning and
         # release the text encoder before any Ray worker maps model weights.
-        del load_after
+        if load_after is not None:
+            del load_after
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         ray_actors, gpu_actors, parallel_dict = ensure_fresh_actors(ray_actors_init)
 
         model_options = {}
