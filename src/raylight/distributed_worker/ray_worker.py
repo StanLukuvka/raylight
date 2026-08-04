@@ -47,6 +47,7 @@ from raylight.distributed_worker.ray_worker_vae import (
 )
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
+from raylight.memory_telemetry import process_memory_snapshot
 from ray.exceptions import RayActorError
 
 
@@ -586,6 +587,34 @@ class RayWorker:
         active_key = self._active_model_key(unet_path, model_options)
         return self.model is not None and self.active_request_key == active_key and not self._fsdp_init_failed()
 
+    def get_memory_snapshot(self):
+        snapshot = process_memory_snapshot()
+        snapshot["rank"] = self.local_rank
+        if torch.cuda.is_available():
+            snapshot["cuda_allocated_bytes"] = torch.cuda.memory_allocated()
+            snapshot["cuda_reserved_bytes"] = torch.cuda.memory_reserved()
+        else:
+            snapshot["cuda_allocated_bytes"] = None
+            snapshot["cuda_reserved_bytes"] = None
+        return snapshot
+
+    def _log_memory_snapshot(self, stage):
+        snapshot = self.get_memory_snapshot()
+        gib = 1024**3
+        rss = snapshot["rss_bytes"]
+        peak = snapshot["peak_rss_bytes"]
+        allocated = snapshot["cuda_allocated_bytes"]
+        parts = []
+        parts.append(f"rss={rss / gib:.2f} GiB" if rss is not None else "rss=unknown")
+        parts.append(f"peak_rss={peak / gib:.2f} GiB" if peak is not None else "peak_rss=unknown")
+        parts.append(
+            f"cuda_allocated={allocated / gib:.2f} GiB"
+            if allocated is not None
+            else "cuda_allocated=unknown"
+        )
+        print(f"[Rank {self.local_rank}] memory {stage}: {' '.join(parts)}")
+        return snapshot
+
     def _fsdp_init_failed(self):
         if self.model is None or getattr(self.model, "fsdp_state_dict", None) is None:
             return False
@@ -593,12 +622,15 @@ class RayWorker:
         return isinstance(base_model.diffusion_model, FSDPModule)
 
     def _patch_fsdp_for_sampling(self):
+        self._log_memory_snapshot("before FSDP shard materialization")
         try:
             self.model.patch_fsdp()
         except Exception:
             self.active_request_key = None
             self.is_model_loaded = False
             raise
+        finally:
+            self._log_memory_snapshot("after FSDP shard materialization")
 
     def _normalize_model_options(self, model_options):
         if not model_options:
@@ -832,6 +864,7 @@ class RayWorker:
 
     def load_unet(self, unet_path, model_options):
         if self.parallel_dict["is_fsdp"] is True:
+            self._log_memory_snapshot("before quantized FSDP checkpoint mapping")
             active_key = self._active_model_key(unet_path, model_options)
 
             # Fast path: same base model + same LoRA — reuse FSDP-wrapped model
@@ -890,6 +923,7 @@ class RayWorker:
             self.overwrite_cast_dtype = getattr(base_model, "manual_cast_dtype", None)
             self.is_model_loaded = True
             self.active_request_key = active_key
+            self._log_memory_snapshot("after quantized FSDP checkpoint mapping")
             return
         else:
             import comfy.sd as comfy_sd
