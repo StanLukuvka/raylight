@@ -48,7 +48,19 @@ def checkout(url: str, destination: Path, ref: str) -> None:
 def find_checkpoint() -> Path:
     matches = sorted(INPUT.rglob(CHECKPOINT))
     if not matches:
-        raise FileNotFoundError(f"{CHECKPOINT} was not found below {INPUT}")
+        os.environ.setdefault("KAGGLEHUB_CACHE", "/kaggle/temp/kagglehub")
+        import kagglehub
+
+        print(f"{CHECKPOINT} is not mounted; downloading that single Dataset file", flush=True)
+        downloaded = Path(
+            kagglehub.dataset_download(
+                "stanlukuvka/minimax-h3-comfyui-weights",
+                path=CHECKPOINT,
+            )
+        )
+        matches = [downloaded] if downloaded.is_file() else sorted(downloaded.rglob(CHECKPOINT))
+    if not matches:
+        raise FileNotFoundError(f"{CHECKPOINT} was not found below {INPUT} or in KaggleHub cache")
     source = matches[0]
     expected = 20_970_379_616
     if source.stat().st_size != expected:
