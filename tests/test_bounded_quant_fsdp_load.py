@@ -2,7 +2,9 @@ import ast
 from pathlib import Path
 
 
-MODEL_PATCHER_PATH = Path(__file__).parents[1] / "src" / "raylight" / "comfy_dist" / "model_patcher.py"
+ROOT = Path(__file__).parents[1]
+MODEL_PATCHER_PATH = ROOT / "src" / "raylight" / "comfy_dist" / "model_patcher.py"
+FSDP_UTILS_PATH = ROOT / "src" / "raylight" / "comfy_dist" / "fsdp_utils.py"
 
 
 def test_quantized_fsdp_releases_checkpoint_entries_as_shards_materialize():
@@ -25,3 +27,20 @@ def test_quantized_fsdp_releases_checkpoint_entries_as_shards_materialize():
 
     assert isinstance(release_keyword.value, ast.Constant)
     assert release_keyword.value.value is True
+
+
+def test_quant_release_keeps_independent_input_scales_until_their_turn():
+    tree = ast.parse(FSDP_UTILS_PATH.read_text())
+    release = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_release_quant_keys"
+    )
+    literals = {
+        node.value
+        for node in ast.walk(release)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert "input_scale" not in literals
+    assert "scale_input" not in literals
