@@ -31,7 +31,7 @@ FAILURE = WORK / "raylight_loader_failure.txt"
 LOG = WORK / "raylight_loader_test.log"
 COMFY_COMMIT = "9a9fdb10ed144ce760d9682cb247526ea23cc525"
 RAYLIGHT_REF = os.environ.get(
-    "RAYLIGHT_TEST_REF", "7d9219fd854b1851463479274666b9f9fd2b3eae"
+    "RAYLIGHT_TEST_REF", "d54addfe58d9e36993e2a010784b4b4ede1b1ef5"
 )
 CHECKPOINT = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 
@@ -40,6 +40,17 @@ def run(command: list[str | Path], *, cwd: Path | None = None) -> None:
     printable = " ".join(str(item) for item in command)
     print(f"+ {printable}", flush=True)
     subprocess.run([str(item) for item in command], cwd=cwd, check=True)
+
+
+def prepare_owned_root() -> None:
+    if ROOT.is_symlink():
+        raise RuntimeError(f"Refusing symlinked acceptance root: {ROOT}")
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if not ROOT.is_dir():
+        raise RuntimeError(f"Acceptance root is not a directory: {ROOT}")
+    for child in (COMFY, VENV):
+        if child.is_symlink():
+            raise RuntimeError(f"Refusing symlinked acceptance path: {child}")
 
 
 def checkout(url: str, destination: Path, ref: str) -> None:
@@ -98,6 +109,7 @@ def accelerator_preflight() -> Path:
 
 
 def install(checkpoint: Path) -> None:
+    prepare_owned_root()
     checkout("https://github.com/Comfy-Org/ComfyUI.git", COMFY, COMFY_COMMIT)
     checkout("https://github.com/StanLukuvka/raylight.git", RAYLIGHT, RAYLIGHT_REF)
 
