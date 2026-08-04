@@ -74,7 +74,7 @@ def prompt_graph() -> dict:
                 "clear_vram_after_sampling": True,
                 "FSDP": True,
                 "FSDP_CPU_OFFLOAD": False,
-                "XFuser_attention": "TORCH_FLASH",
+                "XFuser_attention": "TORCH_EFFICIENT",
                 "skip_comm_test": False,
                 "use_mmap": True,
             },
