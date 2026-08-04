@@ -12,6 +12,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import traceback
 import urllib.request
 from pathlib import Path
@@ -171,6 +173,27 @@ ray.shutdown()
 '''
 
 
+def monitor_cgroup_memory(stop: threading.Event) -> None:
+    candidates = [
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ]
+    usage_path = next((path for path in candidates if path.exists()), None)
+    if usage_path is None:
+        return
+    output_path = WORK / "raylight_cgroup_memory.csv"
+    with output_path.open("w") as output:
+        output.write("monotonic_seconds,memory_bytes\n")
+        output.flush()
+        while not stop.wait(1):
+            try:
+                usage = int(usage_path.read_text().strip())
+            except (OSError, ValueError):
+                continue
+            output.write(f"{time.monotonic():.3f},{usage}\n")
+            output.flush()
+
+
 def main() -> None:
     RESULT.unlink(missing_ok=True)
     LOG.unlink(missing_ok=True)
@@ -178,15 +201,22 @@ def main() -> None:
     install(checkpoint)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    with LOG.open("w") as output:
-        completed = subprocess.run(
-            [str(PYTHON), "-u", "-c", ACCEPTANCE_CODE],
-            cwd=COMFY,
-            env=env,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            timeout=45 * 60,
-        )
+    monitor_stop = threading.Event()
+    monitor = threading.Thread(target=monitor_cgroup_memory, args=(monitor_stop,), daemon=True)
+    monitor.start()
+    try:
+        with LOG.open("w") as output:
+            completed = subprocess.run(
+                [str(PYTHON), "-u", "-c", ACCEPTANCE_CODE],
+                cwd=COMFY,
+                env=env,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=45 * 60,
+            )
+    finally:
+        monitor_stop.set()
+        monitor.join(timeout=5)
     print(LOG.read_text()[-30_000:])
     if completed.returncode != 0:
         raise RuntimeError(f"Acceptance process exited {completed.returncode}; see {LOG}")
