@@ -72,7 +72,7 @@ def test_quantized_worker_materializes_and_releases_full_state_before_returning(
         if isinstance(node, ast.FunctionDef) and node.name == "load_unet"
     )
     calls = {
-        node.func.attr: node.lineno
+        node.func.attr: node
         for node in ast.walk(load_method)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -80,5 +80,18 @@ def test_quantized_worker_materializes_and_releases_full_state_before_returning(
         and node.func.value.id == "self"
         and node.func.attr in {"set_state_dict", "_patch_fsdp_for_sampling"}
     }
+    parents = {
+        child: parent
+        for parent in ast.walk(load_method)
+        for child in ast.iter_child_nodes(parent)
+    }
 
-    assert calls["set_state_dict"] < calls["_patch_fsdp_for_sampling"]
+    assert calls["set_state_dict"].lineno < calls["_patch_fsdp_for_sampling"].lineno
+    for call in calls.values():
+        ancestors = []
+        node = call
+        while node in parents:
+            node = parents[node]
+            ancestors.append(node)
+        guards = [ancestor for ancestor in ancestors if isinstance(ancestor, ast.If)]
+        assert any("is_quant" in ast.dump(guard.test) for guard in guards)

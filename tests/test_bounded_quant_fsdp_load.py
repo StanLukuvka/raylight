@@ -68,3 +68,35 @@ def test_quantized_local_shards_do_not_pass_through_dtensor_from_local_view():
         and node.func.attr == "from_local"
         for node in calls
     )
+
+
+def test_quant_layout_handlers_cover_fsdp_state_assignment():
+    tree = ast.parse(MODEL_PATCHER_PATH.read_text())
+    patch_fsdp = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "patch_fsdp"
+    )
+    with_block = next(
+        node
+        for node in ast.walk(patch_fsdp)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Name)
+            and item.context_expr.id == "patch_context"
+            for item in node.items
+        )
+    )
+
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "load_from_full_model_state_dict"
+        for node in ast.walk(with_block)
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "sitepkg_ck_patches"
+        for node in ast.walk(patch_fsdp)
+    )

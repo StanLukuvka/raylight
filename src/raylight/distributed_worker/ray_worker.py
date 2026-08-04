@@ -927,9 +927,11 @@ class RayWorker:
 
             # Quantized workers own distinct checkpoint mappings. Materialize
             # and release this worker's full mapping before the orchestrator
-            # starts the next worker, keeping aggregate host RSS bounded.
-            self.set_state_dict()
-            self._patch_fsdp_for_sampling()
+            # starts the next worker, keeping aggregate host RSS bounded. The
+            # non-quantized path still shares worker 0's meta model with peers.
+            if self.parallel_dict.get("is_quant", False):
+                self.set_state_dict()
+                self._patch_fsdp_for_sampling()
 
             base_model = getattr(self.model, "model", self.model)
             self.overwrite_cast_dtype = getattr(base_model, "manual_cast_dtype", None)

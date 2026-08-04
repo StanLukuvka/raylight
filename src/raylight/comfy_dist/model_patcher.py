@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+from contextlib import nullcontext
 import logging
 import gc
 from typing import TYPE_CHECKING
@@ -273,42 +274,53 @@ def patch_fsdp(self):
         self.load_device if isinstance(self.load_device, torch.device) else torch.device("cuda", torch.cuda.current_device())
     )
 
+    patch_context = nullcontext()
     if use_quant_loader:
-        load_from_full_model_state_dict(
-            model=self.model,
-            full_sd=self.fsdp_state_dict,
-            device=target_device,
-            strict=False,
-            cpu_offload=self.is_cpu_offload,
-            # Drop mmap-backed checkpoint entries as soon as their local shard
-            # has been materialized. Retaining the entire quantized state dict
-            # until the end creates an avoidable host-RAM peak on multi-worker
-            # notebook runtimes.
-            release_sd=True,
-        )
-    else:
-        options = StateDictOptions(
-            full_state_dict=True,
-            strict=False,
-            cpu_offload=self.is_cpu_offload,
-            broadcast_from_rank0=True,
-        )
-        set_model_state_dict(self.model, self.fsdp_state_dict, options=options)
+        from .kitchen_distributed import sitepkg_ck_patches
 
-    # Materialize excluded params AFTER state dict loading so that
-    # set_model_state_dict only sees meta-device params (single device).
-    if excluded_modules:
-        count = materialize_excluded_params(
-            model=self.model,
-            excluded_modules=excluded_modules,
-            full_sd=self.fsdp_state_dict,
-            device=target_device,
-            cpu_offload=self.is_cpu_offload,
-        )
-        if count > 0:
-            print(f"[Rank {self.rank}] Materialized {count} excluded ControlNet-shared params on {target_device}")
+        patch_context = sitepkg_ck_patches()
 
-    _pre_init_fsdp(diffusion_model)
+    # FSDP2 resets assigned sharded parameters with local_tensor.view(-1).
+    # Keep the quant layout handlers active across state assignment and FSDP
+    # post-load hooks so that view/reshape preserve packed payloads instead of
+    # falling back to full dequantization.
+    with patch_context:
+        if use_quant_loader:
+            load_from_full_model_state_dict(
+                model=self.model,
+                full_sd=self.fsdp_state_dict,
+                device=target_device,
+                strict=False,
+                cpu_offload=self.is_cpu_offload,
+                # Drop mmap-backed checkpoint entries as soon as their local shard
+                # has been materialized. Retaining the entire quantized state dict
+                # until the end creates an avoidable host-RAM peak on multi-worker
+                # notebook runtimes.
+                release_sd=True,
+            )
+        else:
+            options = StateDictOptions(
+                full_state_dict=True,
+                strict=False,
+                cpu_offload=self.is_cpu_offload,
+                broadcast_from_rank0=True,
+            )
+            set_model_state_dict(self.model, self.fsdp_state_dict, options=options)
+
+        # Materialize excluded params AFTER state dict loading so that
+        # set_model_state_dict only sees meta-device params (single device).
+        if excluded_modules:
+            count = materialize_excluded_params(
+                model=self.model,
+                excluded_modules=excluded_modules,
+                full_sd=self.fsdp_state_dict,
+                device=target_device,
+                cpu_offload=self.is_cpu_offload,
+            )
+            if count > 0:
+                print(f"[Rank {self.rank}] Materialized {count} excluded ControlNet-shared params on {target_device}")
+
+        _pre_init_fsdp(diffusion_model)
     self.fsdp_state_dict = None
 
     print("FSDP registered successfully.")

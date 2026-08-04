@@ -58,4 +58,3 @@ def test_conditioning_barrier_collects_released_encoder_before_starting_actors()
     )
 
     assert collect_call.lineno < actor_call.lineno
-
