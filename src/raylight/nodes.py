@@ -25,6 +25,7 @@ from .distributed_worker.ray_worker import (
     ray_nccl_tester,
 )
 from .distributed_worker.ray_worker_vae import combine_dist_vae_partials, combine_seedvr2_vae_partials
+from .load_planning import load_workers_sequentially
 
 
 class AnyType(str):
@@ -919,11 +920,11 @@ class RayUNETLoader:
                         loaded_futures.append(actor.set_state_dict.remote())
 
                 else:
-                    for actor in gpu_actors:
-                        loaded_futures.append(actor.load_unet.remote(unet_path, model_options=model_options))
-
-                    ray.get(loaded_futures)
-                    loaded_futures = []
+                    load_workers_sequentially(
+                        gpu_actors,
+                        start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
+                        wait=ray.get,
+                    )
 
                     for actor in gpu_actors:
                         loaded_futures.append(actor.set_state_dict.remote())
@@ -950,11 +951,11 @@ class RayUNETLoader:
                             loaded_futures.append(actor.set_state_dict.remote())
 
                     else:
-                        for actor in group_actors:
-                            loaded_futures.append(actor.load_unet.remote(unet_path, model_options=model_options))
-
-                        ray.get(loaded_futures)
-                        loaded_futures = []
+                        load_workers_sequentially(
+                            group_actors,
+                            start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
+                            wait=ray.get,
+                        )
 
                         for actor in group_actors:
                             loaded_futures.append(actor.set_state_dict.remote())
