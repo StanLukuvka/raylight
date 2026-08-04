@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import traceback
+import urllib.request
 from pathlib import Path
 
 
@@ -48,19 +49,20 @@ def checkout(url: str, destination: Path, ref: str) -> None:
 def find_checkpoint() -> Path:
     matches = sorted(INPUT.rglob(CHECKPOINT))
     if not matches:
-        os.environ.setdefault("KAGGLEHUB_CACHE", "/kaggle/temp/kagglehub")
-        import kagglehub
-
-        print(f"{CHECKPOINT} is not mounted; downloading that single Dataset file", flush=True)
-        downloaded = Path(
-            kagglehub.dataset_download(
-                "stanlukuvka/minimax-h3-comfyui-weights",
-                path=CHECKPOINT,
+        download_url = os.environ.get("RAYLIGHT_CHECKPOINT_URL")
+        if not download_url:
+            raise FileNotFoundError(
+                f"{CHECKPOINT} is not mounted below {INPUT}; attach the Dataset or set "
+                "RAYLIGHT_CHECKPOINT_URL to a temporary authenticated file URL"
             )
-        )
-        matches = [downloaded] if downloaded.is_file() else sorted(downloaded.rglob(CHECKPOINT))
-    if not matches:
-        raise FileNotFoundError(f"{CHECKPOINT} was not found below {INPUT} or in KaggleHub cache")
+        destination = Path("/kaggle/temp") / CHECKPOINT
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial = destination.with_suffix(destination.suffix + ".part")
+        print(f"Downloading {CHECKPOINT} from RAYLIGHT_CHECKPOINT_URL", flush=True)
+        with urllib.request.urlopen(download_url, timeout=120) as source, partial.open("wb") as target:
+            shutil.copyfileobj(source, target, length=16 * 1024 * 1024)
+        partial.replace(destination)
+        matches = [destination]
     source = matches[0]
     expected = 20_970_379_616
     if source.stat().st_size != expected:
