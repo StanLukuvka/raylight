@@ -5,6 +5,9 @@ from pathlib import Path
 
 MODULE_PATH = Path(__file__).parents[1] / "src" / "raylight" / "load_planning.py"
 NODES_PATH = Path(__file__).parents[1] / "src" / "raylight" / "nodes.py"
+RAY_WORKER_PATH = (
+    Path(__file__).parents[1] / "src" / "raylight" / "distributed_worker" / "ray_worker.py"
+)
 
 
 def _load_module():
@@ -56,3 +59,26 @@ def test_quantized_fsdp_branches_use_the_sequential_loader():
     ]
 
     assert len(calls) == 2
+
+
+def test_quantized_worker_materializes_and_releases_full_state_before_returning():
+    tree = ast.parse(RAY_WORKER_PATH.read_text())
+    worker_class = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RayWorker"
+    )
+    load_method = next(
+        node
+        for node in worker_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "load_unet"
+    )
+    calls = {
+        node.func.attr: node.lineno
+        for node in ast.walk(load_method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr in {"set_state_dict", "_patch_fsdp_for_sampling"}
+    }
+
+    assert calls["set_state_dict"] < calls["_patch_fsdp_for_sampling"]

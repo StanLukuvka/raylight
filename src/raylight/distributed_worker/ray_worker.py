@@ -925,6 +925,12 @@ class RayWorker:
             if self.lora_list is not None:
                 self.load_lora()
 
+            # Quantized workers own distinct checkpoint mappings. Materialize
+            # and release this worker's full mapping before the orchestrator
+            # starts the next worker, keeping aggregate host RSS bounded.
+            self.set_state_dict()
+            self._patch_fsdp_for_sampling()
+
             base_model = getattr(self.model, "model", self.model)
             self.overwrite_cast_dtype = getattr(base_model, "manual_cast_dtype", None)
             self.is_model_loaded = True

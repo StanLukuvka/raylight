@@ -930,9 +930,6 @@ class RayUNETLoader:
                         wait=ray.get,
                     )
 
-                    for actor in gpu_actors:
-                        loaded_futures.append(actor.set_state_dict.remote())
-
             else:
                 # Multiple replicas — load model per group
                 for group_id in range(num_replicas):
@@ -960,9 +957,6 @@ class RayUNETLoader:
                             start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
                             wait=ray.get,
                         )
-
-                        for actor in group_actors:
-                            loaded_futures.append(actor.set_state_dict.remote())
 
             ray.get(loaded_futures)
             loaded_futures = []
