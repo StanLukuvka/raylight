@@ -56,7 +56,22 @@ def find_checkpoint() -> Path:
     return source
 
 
-def install() -> None:
+def accelerator_preflight() -> Path:
+    result = subprocess.run(["nvidia-smi", "-L"], check=True, text=True, capture_output=True)
+    gpus = [line for line in result.stdout.splitlines() if line.strip()]
+    checkpoint = find_checkpoint()
+    preflight = {
+        "gpu_count": len(gpus),
+        "checkpoint": str(checkpoint),
+        "checkpoint_bytes": checkpoint.stat().st_size,
+    }
+    (WORK / "raylight_loader_preflight.json").write_text(json.dumps(preflight, indent=2))
+    if len(gpus) != 2:
+        raise RuntimeError(f"Acceptance test requires exactly two GPUs; found {len(gpus)}")
+    return checkpoint
+
+
+def install(checkpoint: Path) -> None:
     checkout("https://github.com/Comfy-Org/ComfyUI.git", COMFY, COMFY_COMMIT)
     checkout("https://github.com/StanLukuvka/raylight.git", RAYLIGHT, RAYLIGHT_REF)
 
@@ -81,7 +96,7 @@ def install() -> None:
     destination = COMFY / "models" / "diffusion_models" / CHECKPOINT
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
-    destination.symlink_to(find_checkpoint())
+    destination.symlink_to(checkpoint)
 
 
 ACCEPTANCE_CODE = r'''
@@ -145,7 +160,8 @@ ray.shutdown()
 def main() -> None:
     RESULT.unlink(missing_ok=True)
     LOG.unlink(missing_ok=True)
-    install()
+    checkpoint = accelerator_preflight()
+    install(checkpoint)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     with LOG.open("w") as output:
