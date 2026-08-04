@@ -856,6 +856,12 @@ class RayUNETLoader:
         # release the text encoder before any Ray worker maps model weights.
         if load_after is not None:
             del load_after
+            # Conditioning may leave a large quantized text encoder resident
+            # in a non-PyTorch CUDA allocation even after its output is ready.
+            # Explicitly unload Comfy's managed models before Ray workers begin
+            # materializing denoiser shards.
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

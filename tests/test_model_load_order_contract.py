@@ -49,6 +49,13 @@ def test_conditioning_barrier_collects_released_encoder_before_starting_actors()
         and node.func.value.id == "gc"
         and node.func.attr == "collect"
     )
+    unload_call = next(
+        node
+        for node in ast.walk(load_method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "unload_all_models"
+    )
     actor_call = next(
         node
         for node in ast.walk(load_method)
@@ -57,4 +64,5 @@ def test_conditioning_barrier_collects_released_encoder_before_starting_actors()
         and node.func.id == "ensure_fresh_actors"
     )
 
+    assert unload_call.lineno < actor_call.lineno
     assert collect_call.lineno < actor_call.lineno
