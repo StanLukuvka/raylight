@@ -831,7 +831,16 @@ class RayUNETLoader:
                     {"tooltip": "Ray Actor to submit the model into"},
                 ),
             },
-            "optional": {"lora": ("RAY_LORA", {"default": None})},
+            "optional": {
+                "lora": ("RAY_LORA", {"default": None}),
+                "load_after": (
+                    "CONDITIONING",
+                    {
+                        "default": None,
+                        "tooltip": "Optional execution dependency. Connect conditioning to finish and release its text encoder before loading distributed weights.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("RAY_ACTORS",)
@@ -840,7 +849,11 @@ class RayUNETLoader:
 
     CATEGORY = "Raylight"
 
-    def load_ray_unet(self, ray_actors_init, unet_name, weight_dtype, lora=None):
+    def load_ray_unet(self, ray_actors_init, unet_name, weight_dtype, lora=None, load_after=None):
+        # `load_after` is an execution-only dependency. Keeping it in this
+        # signature lets memory-constrained workflows finish conditioning and
+        # release the text encoder before any Ray worker maps model weights.
+        del load_after
         ray_actors, gpu_actors, parallel_dict = ensure_fresh_actors(ray_actors_init)
 
         model_options = {}
