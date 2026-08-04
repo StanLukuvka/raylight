@@ -18,6 +18,6 @@ def test_acceptance_harness_uses_an_owned_workspace():
 def test_acceptance_harness_pins_and_verifies_raylight_commit():
     source = HARNESS.read_text()
 
-    assert '"d54addfe58d9e36993e2a010784b4b4ede1b1ef5"' in source
+    assert '"473715b4aec7ff3a554c11556fa1c81e92ba075e"' in source
     assert '"fix/bounded-quant-fsdp-load"' not in source
     assert 'resolved != ref' in source
