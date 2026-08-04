@@ -21,15 +21,18 @@ from pathlib import Path
 
 WORK = Path("/kaggle/working")
 INPUT = Path("/kaggle/input")
-COMFY = WORK / "ComfyUI"
-VENV = WORK / "raylight-test-venv"
+ROOT = WORK / "raylight-loader-acceptance"
+COMFY = ROOT / "ComfyUI"
+VENV = ROOT / "venv"
 PYTHON = VENV / "bin" / "python"
 RAYLIGHT = COMFY / "custom_nodes" / "raylight"
 RESULT = WORK / "raylight_loader_result.json"
 FAILURE = WORK / "raylight_loader_failure.txt"
 LOG = WORK / "raylight_loader_test.log"
 COMFY_COMMIT = "9a9fdb10ed144ce760d9682cb247526ea23cc525"
-RAYLIGHT_REF = os.environ.get("RAYLIGHT_TEST_REF", "fix/bounded-quant-fsdp-load")
+RAYLIGHT_REF = os.environ.get(
+    "RAYLIGHT_TEST_REF", "1df8c9e71c9861c13e4ca40aa4dfb873dc045696"
+)
 CHECKPOINT = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 
 
@@ -40,12 +43,18 @@ def run(command: list[str | Path], *, cwd: Path | None = None) -> None:
 
 
 def checkout(url: str, destination: Path, ref: str) -> None:
+    destination.resolve().relative_to(ROOT.resolve())
     if destination.exists():
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "clone", "--filter=blob:none", "--no-checkout", url, destination])
     run(["git", "-C", destination, "fetch", "--depth", "1", "origin", ref])
     run(["git", "-C", destination, "checkout", "--detach", "FETCH_HEAD"])
+    resolved = subprocess.check_output(
+        ["git", "-C", destination, "rev-parse", "HEAD"], text=True
+    ).strip()
+    if resolved != ref:
+        raise RuntimeError(f"Checkout mismatch for {url}: {resolved} != {ref}")
 
 
 def find_checkpoint() -> Path:
@@ -122,7 +131,7 @@ import os
 import sys
 from pathlib import Path
 
-COMFY = Path("/kaggle/working/ComfyUI")
+COMFY = Path("/kaggle/working/raylight-loader-acceptance/ComfyUI")
 os.chdir(COMFY)
 sys.path.insert(0, str(COMFY))
 sys.path.insert(0, str(COMFY / "custom_nodes" / "raylight" / "src"))
@@ -162,6 +171,12 @@ workers = actors["workers"]
 after_mapping = ray.get([worker.get_memory_snapshot.remote() for worker in workers])
 ray.get([worker._patch_fsdp_for_sampling.remote() for worker in workers])
 after_materialization = ray.get([worker.get_memory_snapshot.remote() for worker in workers])
+remaining_meta = {
+    snapshot["rank"]: snapshot.get("meta_parameter_count")
+    for snapshot in after_materialization
+}
+if any(count != 0 for count in remaining_meta.values()):
+    raise RuntimeError(f"FSDP materialization left meta parameters: {remaining_meta}")
 result = {
     "status": "PASS",
     "checkpoint": checkpoint,
