@@ -280,7 +280,11 @@ def patch_fsdp(self):
             device=target_device,
             strict=False,
             cpu_offload=self.is_cpu_offload,
-            release_sd=False,
+            # Drop mmap-backed checkpoint entries as soon as their local shard
+            # has been materialized. Retaining the entire quantized state dict
+            # until the end creates an avoidable host-RAM peak on multi-worker
+            # notebook runtimes.
+            release_sd=True,
         )
     else:
         options = StateDictOptions(
