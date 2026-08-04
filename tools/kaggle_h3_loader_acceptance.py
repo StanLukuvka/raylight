@@ -31,7 +31,7 @@ FAILURE = WORK / "raylight_loader_failure.txt"
 LOG = WORK / "raylight_loader_test.log"
 COMFY_COMMIT = "9a9fdb10ed144ce760d9682cb247526ea23cc525"
 RAYLIGHT_REF = os.environ.get(
-    "RAYLIGHT_TEST_REF", "f71de57901bef8aa4c16b3c7a0a4e9907eab6e30"
+    "RAYLIGHT_TEST_REF", "7d9219fd854b1851463479274666b9f9fd2b3eae"
 )
 CHECKPOINT = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 
