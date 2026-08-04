@@ -635,6 +635,26 @@ def _release_quant_keys(full_sd: dict[str, Any], param_name: str) -> None:
             full_sd[key] = None
 
 
+def _wrap_quantized_local_as_dtensor(
+    quant_tensor: torch.Tensor,
+    sharded_meta_param: DTensor,
+) -> DTensor:
+    """Wrap a local quantized shard without invoking tensor view dispatch.
+
+    ``DTensor.from_local`` creates an autograd view with
+    ``input.view_as(input)``. Comfy Kitchen handles that view by dequantizing
+    the wrapper subclass, transiently expanding an INT8 ConvRot shard to a
+    full floating tensor and exhausting a T4. Inference parameters do not
+    require the differentiable ``from_local`` boundary, so use DTensor's
+    internal constructor with the FSDP-created metadata spec unchanged.
+    """
+    return DTensor(
+        quant_tensor,
+        sharded_meta_param._spec,
+        requires_grad=quant_tensor.requires_grad,
+    )
+
+
 # Heavily modified from
 # https://github.com/meta-pytorch/torchtune/blob/d0f63bb33d00b8bd3905a010b71d8c6324c2e980/torchtune/training/_distributed.py#L336
 # Need to be done since dcp loader cause wrong dtype among rank when broadcasting.
@@ -669,10 +689,9 @@ def load_from_full_model_state_dict(
                     f"Expected quantized tensor for {param_name}, but could not build it ({_quant_payload_debug_info(param_name, full_sd)})"
                 )
             if hasattr(sharded_meta_param, "device_mesh"):
-                sharded_tensor = DTensor.from_local(
+                sharded_tensor = _wrap_quantized_local_as_dtensor(
                     quant_tensor,
-                    device_mesh=sharded_meta_param.device_mesh,
-                    placements=sharded_meta_param.placements,
+                    sharded_meta_param,
                 )
             else:
                 sharded_tensor = quant_tensor

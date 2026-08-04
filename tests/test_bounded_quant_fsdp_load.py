@@ -44,3 +44,27 @@ def test_quant_release_keeps_independent_input_scales_until_their_turn():
 
     assert "input_scale" not in literals
     assert "scale_input" not in literals
+
+
+def test_quantized_local_shards_do_not_pass_through_dtensor_from_local_view():
+    tree = ast.parse(FSDP_UTILS_PATH.read_text())
+    wrapper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_wrap_quantized_local_as_dtensor"
+    )
+    calls = list(ast.walk(wrapper))
+
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "DTensor"
+        for node in calls
+    )
+    assert not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "from_local"
+        for node in calls
+    )
