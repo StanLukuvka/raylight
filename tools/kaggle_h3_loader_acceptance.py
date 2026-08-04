@@ -62,7 +62,18 @@ def install() -> None:
 
     if VENV.exists():
         shutil.rmtree(VENV)
-    run([sys.executable, "-m", "venv", "--system-site-packages", VENV])
+    run([sys.executable, "-m", "pip", "install", "-q", "virtualenv", "wrapt>=1.16"])
+    run(
+        [
+            sys.executable,
+            "-m",
+            "virtualenv",
+            "--system-site-packages",
+            "-p",
+            sys.executable,
+            VENV,
+        ]
+    )
     run([PYTHON, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
     run([PYTHON, "-m", "pip", "install", "-r", COMFY / "requirements.txt"])
     run([PYTHON, "-m", "pip", "install", "-r", RAYLIGHT / "requirements.txt"])
