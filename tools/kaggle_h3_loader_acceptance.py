@@ -49,13 +49,14 @@ def checkout(url: str, destination: Path, ref: str) -> None:
 
 
 def find_checkpoint() -> Path:
-    matches = sorted(INPUT.rglob(CHECKPOINT))
+    roots = [INPUT, Path("/kaggle/temp")]
+    matches = sorted(path for root in roots if root.exists() for path in root.rglob(CHECKPOINT))
     if not matches:
         download_url = os.environ.get("RAYLIGHT_CHECKPOINT_URL")
         if not download_url:
             raise FileNotFoundError(
-                f"{CHECKPOINT} is not mounted below {INPUT}; attach the Dataset or set "
-                "RAYLIGHT_CHECKPOINT_URL to a temporary authenticated file URL"
+                f"{CHECKPOINT} is not mounted below /kaggle/input or /kaggle/temp; attach the Dataset "
+                "or set RAYLIGHT_CHECKPOINT_URL to a temporary authenticated file URL"
             )
         destination = Path("/kaggle/temp") / CHECKPOINT
         destination.parent.mkdir(parents=True, exist_ok=True)
