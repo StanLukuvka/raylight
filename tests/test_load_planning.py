@@ -1,8 +1,10 @@
+import ast
 import importlib.util
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).parents[1] / "src" / "raylight" / "load_planning.py"
+NODES_PATH = Path(__file__).parents[1] / "src" / "raylight" / "nodes.py"
 
 
 def _load_module():
@@ -33,3 +35,24 @@ def test_workers_finish_loading_one_at_a_time():
         ("start", "rank1"),
         ("finish", "future-rank1"),
     ]
+
+
+def test_quantized_fsdp_branches_use_the_sequential_loader():
+    tree = ast.parse(NODES_PATH.read_text())
+    loader_class = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RayUNETLoader"
+    )
+    load_method = next(
+        node
+        for node in loader_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "load_ray_unet"
+    )
+    calls = [
+        node
+        for node in ast.walk(load_method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "load_workers_sequentially"
+    ]
+
+    assert len(calls) == 2
