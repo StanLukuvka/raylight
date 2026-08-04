@@ -21,7 +21,7 @@ from pathlib import Path
 
 WORK = Path("/kaggle/working")
 INPUT = Path("/kaggle/input")
-ROOT = WORK / "raylight-loader-acceptance"
+ROOT = Path("/kaggle/temp/raylight-loader-acceptance")
 COMFY = ROOT / "ComfyUI"
 VENV = ROOT / "venv"
 PYTHON = VENV / "bin" / "python"
@@ -143,11 +143,11 @@ import os
 import sys
 from pathlib import Path
 
-COMFY = Path("/kaggle/working/raylight-loader-acceptance/ComfyUI")
+COMFY = Path("/kaggle/temp/raylight-loader-acceptance/ComfyUI")
 os.chdir(COMFY)
 sys.path.insert(0, str(COMFY))
 sys.path.insert(0, str(COMFY / "custom_nodes" / "raylight" / "src"))
-os.environ.setdefault("RAYLIGHT_RAY_TMPDIR", "/kaggle/working/raylight-ray")
+os.environ.setdefault("RAYLIGHT_RAY_TMPDIR", "/kaggle/temp/raylight-ray")
 
 import ray
 from raylight.nodes import RayInitializerAdvanced, RayUNETLoader

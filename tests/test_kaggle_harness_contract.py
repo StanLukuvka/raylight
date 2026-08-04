@@ -7,7 +7,7 @@ HARNESS = Path(__file__).parents[1] / "tools" / "kaggle_h3_loader_acceptance.py"
 def test_acceptance_harness_uses_an_owned_workspace():
     source = HARNESS.read_text()
 
-    assert 'ROOT = WORK / "raylight-loader-acceptance"' in source
+    assert 'ROOT = Path("/kaggle/temp/raylight-loader-acceptance")' in source
     assert 'COMFY = ROOT / "ComfyUI"' in source
     assert 'COMFY = WORK / "ComfyUI"' not in source
     assert "destination.resolve().relative_to(ROOT.resolve())" in source
