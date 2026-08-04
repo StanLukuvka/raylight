@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -22,6 +23,7 @@ VENV = WORK / "raylight-test-venv"
 PYTHON = VENV / "bin" / "python"
 RAYLIGHT = COMFY / "custom_nodes" / "raylight"
 RESULT = WORK / "raylight_loader_result.json"
+FAILURE = WORK / "raylight_loader_failure.txt"
 LOG = WORK / "raylight_loader_test.log"
 COMFY_COMMIT = "9a9fdb10ed144ce760d9682cb247526ea23cc525"
 RAYLIGHT_REF = os.environ.get("RAYLIGHT_TEST_REF", "fix/bounded-quant-fsdp-load")
@@ -154,4 +156,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    FAILURE.unlink(missing_ok=True)
+    try:
+        main()
+    except BaseException:
+        FAILURE.write_text(traceback.format_exc())
+        raise
