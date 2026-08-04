@@ -590,6 +590,12 @@ class RayWorker:
     def get_memory_snapshot(self):
         snapshot = process_memory_snapshot()
         snapshot["rank"] = self.local_rank
+        model_patcher = getattr(self, "model", None)
+        inner_model = getattr(model_patcher, "model", None)
+        if inner_model is not None:
+            snapshot["meta_parameter_count"] = sum(
+                parameter.is_meta for parameter in inner_model.parameters()
+            )
         if torch.cuda.is_available():
             snapshot["cuda_allocated_bytes"] = torch.cuda.memory_allocated()
             snapshot["cuda_reserved_bytes"] = torch.cuda.memory_reserved()
