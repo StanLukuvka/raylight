@@ -31,6 +31,13 @@ def test_workflow_is_exactly_five_frames() -> None:
     assert "values[3] = 0.25" not in source
 
 
+def test_workflow_releases_conditioning_before_ray_initializer() -> None:
+    source = _source()
+    assert '"name": "load_after", "shape": 7, "type": "CONDITIONING"' in source
+    assert '"target_id": initializer["id"]' in source
+    assert '"target_id": loader["id"]' in source
+
+
 def test_downloaded_native_binaries_are_checksum_verified() -> None:
     source = _source()
     assert '_require_sha256(archive, FILEBROWSER_ARCHIVE_SHA256' in source

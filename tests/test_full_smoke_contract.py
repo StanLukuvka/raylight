@@ -22,6 +22,7 @@ def test_full_smoke_conditions_before_unet_and_decodes_both_modalities():
     source = SMOKE.read_text()
 
     assert '"load_after": ["conditioning", 0]' in source
+    assert '"ray_object_store_gb": 0.5' in source
     assert '"class_type": "VAEDecode"' in source
     assert '"class_type": "VAEDecodeAudio"' in source
     assert '"class_type": "SaveVideo"' in source

@@ -430,6 +430,32 @@ class RayInitializer:
                         "tooltip": "Use mmap-backed safetensor loading. This can reduce RAM spikes during model load, especially for large checkpoints.",
                     },
                 ),
+                "ray_object_store_gb": (
+                    "FLOAT",
+                    {
+                        "default": 0.5,
+                        "min": 0.1,
+                        "step": 0.1,
+                        "tooltip": "Ray object-store size in GiB. Keep this bounded on notebook hosts.",
+                    },
+                ),
+                "ray_dashboard_address": (
+                    "STRING",
+                    {"default": "None", "tooltip": "Optional Ray dashboard host:port, or None."},
+                ),
+                "torch_dist_address": (
+                    "STRING",
+                    {"default": "127.0.0.1:29500", "tooltip": "torch.distributed rendezvous host:port."},
+                ),
+            },
+            "optional": {
+                "load_after": (
+                    "CONDITIONING",
+                    {
+                        "default": None,
+                        "tooltip": "Finish conditioning and release its models before Ray starts.",
+                    },
+                ),
             },
         }
 
@@ -456,9 +482,10 @@ class RayInitializer:
         skip_comm_test: bool = True,
         use_mmap: bool = True,
         GPU_SELECT: str = "",
-        ray_object_store_gb: float = 2.0,
+        ray_object_store_gb: float = 0.5,
         ray_dashboard_address: str = "None",
         torch_dist_address: str = "None",
+        load_after=None,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -576,6 +603,17 @@ class RayInitializer:
 
         if ray_cluster_address in _LOCAL_CLUSTER_ADDRESSES:
             _configure_raylight_ray_tmpdir(runtime_env_base)
+
+        if load_after is not None:
+            # Ray startup transiently allocates its object store and worker
+            # runtime. Release conditioning first; waiting until RayUNETLoader
+            # is too late because the local Ray cluster already exists then.
+            load_after = None
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         try:
             # Shut down so if comfy user try another workflow it will not cause error

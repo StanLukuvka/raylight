@@ -77,6 +77,8 @@ def prompt_graph() -> dict:
                 "XFuser_attention": "TORCH_EFFICIENT",
                 "skip_comm_test": False,
                 "use_mmap": True,
+                "ray_object_store_gb": 0.5,
+                "load_after": ["conditioning", 0],
             },
         },
         "clip": {

@@ -14,6 +14,55 @@ def _ray_unet_loader() -> ast.ClassDef:
     )
 
 
+def _ray_initializer() -> ast.ClassDef:
+    tree = ast.parse(NODES_PATH.read_text())
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RayInitializer"
+    )
+
+
+def test_ray_initializer_releases_conditioning_before_ray_init():
+    initializer = _ray_initializer()
+    input_types = next(
+        node
+        for node in initializer.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "INPUT_TYPES"
+    )
+    spawn = next(
+        node
+        for node in initializer.body
+        if isinstance(node, ast.FunctionDef) and node.name == "spawn_actor"
+    )
+    contract = ast.dump(input_types)
+    assert "load_after" in contract
+    assert "CONDITIONING" in contract
+    assert "ray_object_store_gb" in contract
+
+    unload_call = next(
+        node
+        for node in ast.walk(spawn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "unload_all_models"
+    )
+    ray_init_call = next(
+        node
+        for node in ast.walk(spawn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ray"
+        and node.func.attr == "init"
+    )
+    assert unload_call.lineno < ray_init_call.lineno
+    default_names = [argument.arg for argument in spawn.args.args[-len(spawn.args.defaults):]]
+    defaults = dict(zip(default_names, spawn.args.defaults, strict=True))
+    assert ast.literal_eval(defaults["ray_object_store_gb"]) == 0.5
+
+
 def test_ray_unet_loader_accepts_conditioning_dependency_before_loading_weights():
     loader = _ray_unet_loader()
     input_types = next(

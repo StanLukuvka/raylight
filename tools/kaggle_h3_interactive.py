@@ -466,6 +466,7 @@ def _make_raylight_workflow(stock_workflow):
     next_link_id = max(link["id"] for link in h3["links"]) + 1
     init_link_id = next_link_id
     load_after_link_id = next_link_id + 1
+    init_after_link_id = next_link_id + 2
     conditioning_input = next(
         item for item in guider.get("inputs", []) if item.get("name") == "conditioning"
     )
@@ -481,7 +482,10 @@ def _make_raylight_workflow(stock_workflow):
         "flags": {},
         "order": 0,
         "mode": 0,
-        "inputs": [],
+        "inputs": [{
+            "name": "load_after", "shape": 7, "type": "CONDITIONING",
+            "link": init_after_link_id,
+        }],
         "outputs": [{
             "name": "ray_actors_init", "type": "RAY_ACTORS_INIT",
             "links": [init_link_id],
@@ -594,11 +598,20 @@ def _make_raylight_workflow(stock_workflow):
         "target_slot": load_after_slot,
         "type": "CONDITIONING",
     })
+    new_links.append({
+        "id": init_after_link_id,
+        "origin_id": conditioning_source["origin_id"],
+        "origin_slot": conditioning_source["origin_slot"],
+        "target_id": initializer["id"],
+        "target_slot": 0,
+        "type": "CONDITIONING",
+    })
     source_node = next(node for node in nodes if node["id"] == conditioning_source["origin_id"])
-    source_node["outputs"][conditioning_source["origin_slot"]].setdefault("links", []).append(load_after_link_id)
+    source_links = source_node["outputs"][conditioning_source["origin_slot"]].setdefault("links", [])
+    source_links.extend([load_after_link_id, init_after_link_id])
     h3["links"] = new_links
     h3["state"]["lastNodeId"] = max(h3["state"].get("lastNodeId", 0), next_node_id)
-    h3["state"]["lastLinkId"] = max(h3["state"].get("lastLinkId", 0), load_after_link_id)
+    h3["state"]["lastLinkId"] = max(h3["state"].get("lastLinkId", 0), init_after_link_id)
 
     data.setdefault("extra", {})["raylight"] = {
         "commit": RAYLIGHT_COMMIT,
