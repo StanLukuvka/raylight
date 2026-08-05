@@ -88,3 +88,11 @@ def test_notebook_entry_can_queue_and_package_only_the_explicit_bounded_diagnost
     assert 'globals()["ACTION"] = "diagnostics"' in source
     assert 'globals()["H3_AUTO_QUEUE_DIAGNOSTIC"] = False' in source
     assert source.count('exec(compile(source, provisioner_url, "exec"), globals())') == 2
+    guard = source.index("Auto-queued diagnostics require H3_STOP_AFTER_FIRST_FORWARD=True")
+    provision = source.index("provisioner_url =")
+    clear = source.index('globals()["H3_AUTO_QUEUE_DIAGNOSTIC"] = False')
+    queue = source.index("subprocess.run(")
+    finally_clause = source.index("finally:")
+    diagnostics = source.index('globals()["ACTION"] = "diagnostics"')
+    assert guard < provision
+    assert clear < queue < finally_clause < diagnostics

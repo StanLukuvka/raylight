@@ -34,6 +34,8 @@ H3_INT8_PROBE_ALLOW_CUDA_UNDER_13 = globals().setdefault(
     "H3_INT8_PROBE_ALLOW_CUDA_UNDER_13", False
 )
 H3_AUTO_QUEUE_DIAGNOSTIC = globals().setdefault("H3_AUTO_QUEUE_DIAGNOSTIC", False)
+if H3_AUTO_QUEUE_DIAGNOSTIC and not H3_STOP_AFTER_FIRST_FORWARD:
+    raise RuntimeError("Auto-queued diagnostics require H3_STOP_AFTER_FIRST_FORWARD=True")
 os.environ["RAYLIGHT_INT8_ACCUMULATOR_MIB"] = str(INT8_ACCUMULATOR_MIB)
 os.environ["RAYLIGHT_H3_MEMORY_TRACE"] = "1" if H3_MEMORY_TRACE else "0"
 os.environ["RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD"] = "1" if H3_STOP_AFTER_FIRST_FORWARD else "0"
@@ -114,19 +116,21 @@ if actual != provisioner_sha256:
 exec(compile(source, provisioner_url, "exec"), globals())  # noqa: S102
 if H3_AUTO_QUEUE_DIAGNOSTIC:
     runner = os.path.join(globals()["RAYLIGHT_DIR"], "tools", "kaggle_h3_queue_bounded_diagnostic.py")
-    subprocess.run(
-        [
-            sys.executable,
-            runner,
-            "--width",
-            str(H3_WIDTH),
-            "--height",
-            str(H3_HEIGHT),
-            "--length",
-            str(H3_LENGTH),
-        ],
-        check=True,
-    )
-    globals()["ACTION"] = "diagnostics"
     globals()["H3_AUTO_QUEUE_DIAGNOSTIC"] = False
-    exec(compile(source, provisioner_url, "exec"), globals())  # noqa: S102
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                runner,
+                "--width",
+                str(H3_WIDTH),
+                "--height",
+                str(H3_HEIGHT),
+                "--length",
+                str(H3_LENGTH),
+            ],
+            check=True,
+        )
+    finally:
+        globals()["ACTION"] = "diagnostics"
+        exec(compile(source, provisioner_url, "exec"), globals())  # noqa: S102
