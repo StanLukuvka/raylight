@@ -12,6 +12,73 @@ _ORIG_LAYOUT_POST = _MISSING
 _PATCHED_LAYOUT = None
 _ORIG_QT_PRE = _MISSING
 _ORIG_QT_POST = _MISSING
+_ORIG_EAGER_INT8_LINEAR = _MISSING
+
+
+def _bounded_eager_int8_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+    convrot: bool = False,
+    convrot_groupsize: int = 256,
+    input_act: str | None = None,
+) -> torch.Tensor:
+    """Run eager INT8 linear without a full int32 accumulator plus BF16 part list.
+
+    Comfy Kitchen's generic eager fallback computes the complete int32 GEMM, builds
+    every scaled BF16 chunk, then concatenates those chunks.  H3 on a 15 GiB T4
+    reaches 13.22 GiB before that final 629 MiB concatenation.  Compute GEMM rows
+    in bounded pieces directly into one output allocation instead.
+    """
+    from comfy_kitchen.backends.eager import quantization as eager_quantization
+    from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
+
+    x = eager_quantization._apply_input_act(x, input_act)
+    if x.shape[-1] != weight.shape[-1]:
+        raise ValueError(
+            f"Input and weight inner dimensions must match, got {x.shape[-1]} and {weight.shape[-1]}"
+        )
+
+    weight = weight.to(device=x.device).contiguous()
+    weight_scale = weight_scale.to(device=x.device, dtype=torch.float32).reshape(-1)
+    if weight_scale.numel() not in (1, weight.shape[0]):
+        raise ValueError(
+            f"INT8 weight scale must be scalar or per-output-channel, got {tuple(weight_scale.shape)} "
+            f"for weight shape {tuple(weight.shape)}"
+        )
+    if convrot:
+        if x.shape[-1] % convrot_groupsize != 0:
+            raise ValueError(
+                f"ConvRot group size {convrot_groupsize} does not divide input features {x.shape[-1]}"
+            )
+        h = _build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
+        x = _rotate_activation(x, h, convrot_groupsize)
+
+    orig_shape = x.shape
+    x_2d = x.reshape(-1, x.shape[-1])
+    x_8, x_scale = eager_quantization.quantize_int8_rowwise(x_2d)
+    m, n = x_8.shape[0], weight.shape[0]
+    output = torch.empty((m, n), dtype=out_dtype, device=x.device)
+    weight_t = weight.T.contiguous()
+    weight_scale = weight_scale.reshape(1, -1)
+    bias_out = None if bias is None else bias.to(device=x.device, dtype=out_dtype).reshape(1, -1)
+
+    # Bound the int32 accumulator for each GEMM to 128 MiB.  Scaling is in-place,
+    # so the only other per-piece temporaries are one FP32 and one output-dtype view.
+    chunk_size = max(1, min(m, 128 * 1024 * 1024 // (n * 4)))
+    for i in range(0, m, chunk_size):
+        end_i = min(i + chunk_size, m)
+        accumulator = eager_quantization._int8_matmul_accumulate(x_8[i:end_i], weight_t)
+        scaled = accumulator.float()
+        scales = x_scale[i:end_i].to(device=x.device, dtype=torch.float32) * weight_scale
+        scaled.mul_(scales)
+        output[i:end_i].copy_(scaled.to(out_dtype))
+        if bias_out is not None:
+            output[i:end_i].add_(bias_out)
+
+    return output.reshape(*orig_shape[:-1], weight.shape[0])
 
 
 def _get_op(path: str) -> Any:
@@ -26,11 +93,17 @@ def _get_op(path: str) -> Any:
 def install_int8_patches() -> None:
     global _PATCHED
     global _ORIG_LAYOUT_PRE, _ORIG_LAYOUT_POST, _PATCHED_LAYOUT, _ORIG_QT_PRE, _ORIG_QT_POST
+    global _ORIG_EAGER_INT8_LINEAR
     if _PATCHED:
         return
 
     from comfy_kitchen.tensor.base import QuantizedTensor, register_layout_op
     from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout as KitchenTensorWiseINT8Layout
+    from comfy_kitchen.backends import eager as eager_backend
+
+    if _ORIG_EAGER_INT8_LINEAR is _MISSING:
+        _ORIG_EAGER_INT8_LINEAR = eager_backend.int8_linear
+    eager_backend.int8_linear = _bounded_eager_int8_linear
 
     try:
         from comfy.quant_ops import get_layout_class as comfy_get_layout_class
@@ -352,9 +425,14 @@ def install_int8_patches() -> None:
 def restore_int8_patches() -> None:
     global _PATCHED
     global _ORIG_LAYOUT_PRE, _ORIG_LAYOUT_POST, _PATCHED_LAYOUT, _ORIG_QT_PRE, _ORIG_QT_POST
+    global _ORIG_EAGER_INT8_LINEAR
 
     from comfy_kitchen.tensor.base import QuantizedTensor
     from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout as KitchenTensorWiseINT8Layout
+    from comfy_kitchen.backends import eager as eager_backend
+
+    if _ORIG_EAGER_INT8_LINEAR is not _MISSING:
+        eager_backend.int8_linear = _ORIG_EAGER_INT8_LINEAR
 
     TensorWiseINT8Layout = _PATCHED_LAYOUT or KitchenTensorWiseINT8Layout
 
@@ -387,4 +465,5 @@ def restore_int8_patches() -> None:
     _PATCHED_LAYOUT = None
     _ORIG_QT_PRE = _MISSING
     _ORIG_QT_POST = _MISSING
+    _ORIG_EAGER_INT8_LINEAR = _MISSING
     _PATCHED = False

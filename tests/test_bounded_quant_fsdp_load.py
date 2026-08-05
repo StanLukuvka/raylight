@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 MODEL_PATCHER_PATH = ROOT / "src" / "raylight" / "comfy_dist" / "model_patcher.py"
 FSDP_UTILS_PATH = ROOT / "src" / "raylight" / "comfy_dist" / "fsdp_utils.py"
+INT8_PATCH_PATH = ROOT / "src" / "raylight" / "comfy_dist" / "kitchen_patches" / "int8.py"
 
 
 def test_quantized_fsdp_releases_checkpoint_entries_as_shards_materialize():
@@ -100,3 +101,25 @@ def test_quant_layout_handlers_cover_fsdp_state_assignment():
         and node.func.id == "sitepkg_ck_patches"
         for node in ast.walk(patch_fsdp)
     )
+
+
+def test_eager_int8_linear_streams_matmul_rows_into_preallocated_output():
+    tree = ast.parse(INT8_PATCH_PATH.read_text())
+    bounded = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_bounded_eager_int8_linear"
+    )
+    source = ast.unparse(bounded)
+
+    assert "torch.empty" in source
+    assert "_int8_matmul_accumulate(x_8[i:end_i], weight_t)" in source
+    assert "output[i:end_i].copy_" in source
+    assert "scaled_parts" not in source
+    assert "torch.cat" not in source
+
+
+def test_int8_patch_installs_and_restores_bounded_eager_kernel():
+    source = INT8_PATCH_PATH.read_text()
+    assert "eager_backend.int8_linear = _bounded_eager_int8_linear" in source
+    assert "eager_backend.int8_linear = _ORIG_EAGER_INT8_LINEAR" in source
