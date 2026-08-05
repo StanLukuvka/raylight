@@ -25,10 +25,13 @@ def test_dependency_verification_is_derived_from_config() -> None:
     assert "kernels==0.16.0" not in source
 
 
-def test_workflow_is_exactly_five_frames() -> None:
+def test_workflow_is_five_second_dual_t4_profile() -> None:
     source = _source()
-    assert "values[3] = 0.20  # exact five-frame H3 clip" in source
-    assert "values[3] = 0.25" not in source
+    assert 'if conditioning_node.get("type") != "MiniMaxH3ImageToVideo":' in source
+    assert "conditioning_values[1] = 608" in source
+    assert "conditioning_values[2] = 352" in source
+    assert "conditioning_values[3] = 124  # H3 17k+5 grid: about 5.17 seconds at 24 FPS" in source
+    assert "conditioning_values[3] = 0.20" not in source
 
 
 def test_workflow_releases_conditioning_before_ray_initializer() -> None:

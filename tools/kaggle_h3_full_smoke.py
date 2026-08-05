@@ -105,7 +105,7 @@ def prompt_graph() -> dict:
                 "prompt": prompt,
                 "width": 608,
                 "height": 352,
-                "length": 5,
+                "length": 124,
             },
         },
         "unet": {

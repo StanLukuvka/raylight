@@ -473,6 +473,23 @@ def _make_raylight_workflow(stock_workflow):
     conditioning_source = next(
         link for link in h3["links"] if link["id"] == conditioning_input["link"]
     )
+    conditioning_node = next(
+        node for node in nodes if node.get("id") == conditioning_source["origin_id"]
+    )
+    if conditioning_node.get("type") != "MiniMaxH3ImageToVideo":
+        raise RuntimeError(
+            "Official workflow conditioning source changed; refusing to guess the H3 length widget"
+        )
+    conditioning_values = conditioning_node.get("widgets_values", [])
+    if len(conditioning_values) < 4:
+        raise RuntimeError("Official MiniMaxH3ImageToVideo widgets are incomplete")
+    conditioning_values[0] = (
+        "A single red ball rolls from left to right across a plain studio floor. "
+        "Locked camera, one continuous shot, no text or cuts. Simple natural rolling sound."
+    )
+    conditioning_values[1] = 608
+    conditioning_values[2] = 352
+    conditioning_values[3] = 124  # H3 17k+5 grid: about 5.17 seconds at 24 FPS
 
     initializer = {
         "id": next_node_id,
@@ -637,17 +654,6 @@ def _install_workflows():
             values = node.get("widgets_values", [])
             if len(values) >= 2:
                 values[1] = 0.2  # roughly 608x352 at 16:9
-        inputs = node.get("inputs", [])
-        if any(item.get("label") == "duration" for item in inputs):
-            values = node.get("widgets_values", [])
-            if len(values) >= 4:
-                values[3] = 0.20  # exact five-frame H3 clip
-            if values:
-                values[0] = (
-                    "A single red ball rolls from left to right across a plain studio "
-                    "floor. Locked camera, one continuous shot, no text or cuts. "
-                    "Simple natural rolling sound."
-                )
 
     unsafe_or_stale = (
         Path(OFFICIAL_WORKFLOW_PATH),
