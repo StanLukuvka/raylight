@@ -76,6 +76,12 @@ def _sha256(path, chunk_size=32 * 1024 * 1024):
     return digest.hexdigest()
 
 
+def _require_sha256(path, expected, label):
+    actual = _sha256(path)
+    if actual.lower() != str(expected).lower():
+        raise RuntimeError(f"{label} SHA256 mismatch: {actual} != {expected}")
+
+
 def _download_small(url, destination, *, min_bytes=1, executable=False):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -658,6 +664,7 @@ def _install_filebrowser():
             f"v{FILEBROWSER_VERSION}/linux-amd64-filebrowser.tar.gz"
         )
         _download_small(url, archive, min_bytes=1_000_000)
+        _require_sha256(archive, FILEBROWSER_ARCHIVE_SHA256, "FileBrowser archive")
         with tarfile.open(archive, "r:gz") as tar:
             member = next((m for m in tar.getmembers() if Path(m.name).name == "filebrowser"), None)
             if member is None:
@@ -668,6 +675,7 @@ def _install_filebrowser():
             with open(binary, "wb") as out:
                 shutil.copyfileobj(extracted, out)
         archive.unlink(missing_ok=True)
+    _require_sha256(binary, FILEBROWSER_BINARY_SHA256, "FileBrowser binary")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     database = Path(WORK_DIR) / "filebrowser.db"
     if not database.exists():
@@ -730,7 +738,11 @@ def _find_cloudflare_files():
             min_bytes=5_000_000,
             executable=True,
         )
+    _require_sha256(binary, CLOUDFLARED_SHA256, "cloudflared binary")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    for sensitive in (config, config.parent / "tunnel.json"):
+        if sensitive.exists():
+            sensitive.chmod(0o600)
     version = _run([binary, "--version"], capture=True)
     print(f"[✓] {version.stdout.strip() or version.stderr.strip()}")
     return binary, config

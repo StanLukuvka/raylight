@@ -31,6 +31,13 @@ def test_workflow_is_exactly_five_frames() -> None:
     assert "values[3] = 0.25" not in source
 
 
+def test_downloaded_native_binaries_are_checksum_verified() -> None:
+    source = _source()
+    assert '_require_sha256(archive, FILEBROWSER_ARCHIVE_SHA256' in source
+    assert '_require_sha256(binary, FILEBROWSER_BINARY_SHA256' in source
+    assert '_require_sha256(binary, CLOUDFLARED_SHA256' in source
+
+
 def test_fake_weight_mode_uses_sparse_exact_size_placeholders(tmp_path: Path) -> None:
     tree = ast.parse(_source())
     node = next(
