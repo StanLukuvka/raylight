@@ -854,6 +854,16 @@ class RayUNETLoader:
         # `load_after` is an execution-only dependency. Keeping it in this
         # signature lets memory-constrained workflows finish conditioning and
         # release the text encoder before any Ray worker maps model weights.
+        # MiniMax H3 cannot safely fall back to scheduler-dependent execution:
+        # its Qwen encoder and the first full denoiser mapping exceed bounded
+        # notebook memory when they overlap. Fail before starting actors rather
+        # than letting an old/stale workflow kill the notebook kernel.
+        if load_after is None and "minimax_h3" in unet_name.lower():
+            raise RuntimeError(
+                "MiniMax H3 RayUNETLoader requires the conditioning output on "
+                "load_after. Load the bounded H3 Raylight workflow; stale or "
+                "stock workflows can overlap Qwen with denoiser loading and OOM."
+            )
         if load_after is not None:
             del load_after
             # Conditioning may leave a large quantized text encoder resident

@@ -66,3 +66,27 @@ def test_conditioning_barrier_collects_released_encoder_before_starting_actors()
 
     assert unload_call.lineno < actor_call.lineno
     assert collect_call.lineno < actor_call.lineno
+
+
+def test_minimax_h3_fails_closed_without_conditioning_barrier_before_starting_actors():
+    cls = _ray_unet_loader()
+    load_method = next(
+        node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "load_ray_unet"
+    )
+    actor_call = next(
+        node
+        for node in ast.walk(load_method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ensure_fresh_actors"
+    )
+    fail_closed = next(
+        node
+        for node in ast.walk(load_method)
+        if isinstance(node, ast.If)
+        and "minimax_h3" in ast.dump(node)
+        and any(isinstance(child, ast.Raise) for child in ast.walk(node))
+    )
+
+    assert fail_closed.lineno < actor_call.lineno
+    assert "load_after" in ast.dump(fail_closed)
