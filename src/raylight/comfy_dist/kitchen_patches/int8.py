@@ -65,9 +65,10 @@ def _bounded_eager_int8_linear(
     weight_scale = weight_scale.reshape(1, -1)
     bias_out = None if bias is None else bias.to(device=x.device, dtype=out_dtype).reshape(1, -1)
 
-    # Bound the int32 accumulator for each GEMM to 128 MiB.  Scaling is in-place,
-    # so the only other per-piece temporaries are one FP32 and one output-dtype view.
-    chunk_size = max(1, min(m, 128 * 1024 * 1024 // (n * 4)))
+    # This exact dual-T4 profile has about 0.9 GiB of measured allocator headroom.
+    # A 256 MiB cap lets its approximately 220 MiB largest output run as one GEMM
+    # while retaining a substantial reserve below the observed T4 limit.
+    chunk_size = max(1, min(m, 256 * 1024 * 1024 // (n * 4)))
     for i in range(0, m, chunk_size):
         end_i = min(i + chunk_size, m)
         accumulator = eager_quantization._int8_matmul_accumulate(x_8[i:end_i], weight_t)

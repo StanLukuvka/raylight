@@ -112,9 +112,11 @@ def test_eager_int8_linear_streams_matmul_rows_into_preallocated_output():
     )
     source = ast.unparse(bounded)
 
-    assert "torch.empty" in source
+    assert "output = torch.empty" in source
+    assert "256 * 1024 * 1024 // (n * 4)" in source
     assert "_int8_matmul_accumulate(x_8[i:end_i], weight_t)" in source
     assert "output[i:end_i].copy_" in source
+
     assert "scaled_parts" not in source
     assert "torch.cat" not in source
 
