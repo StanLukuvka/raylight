@@ -53,6 +53,7 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
     assert namespace["H3_INT8_PROBE_ITERATIONS"] == 3
     assert namespace["H3_INT8_PROBE_FULL_ROWS"] is False
     assert namespace["H3_INT8_PROBE_ALLOW_CUDA_UNDER_13"] is False
+    assert namespace["H3_AUTO_QUEUE_DIAGNOSTIC"] is False
     assert namespace["USE_FAKE_MODEL_STUBS"] is True
     assert namespace["COMFY_EXTRA_ARGS"] == [
         "--listen",
@@ -78,3 +79,12 @@ def test_notebook_entry_exports_diagnostic_memory_controls():
         'os.environ["RAYLIGHT_H3_PHASE_PROFILE"] = '
         '"1" if H3_PHASE_PROFILE else "0"'
     ) in source
+
+
+def test_notebook_entry_can_queue_and_package_only_the_explicit_bounded_diagnostic():
+    source = ENTRY_PATH.read_text()
+    assert 'globals().setdefault("H3_AUTO_QUEUE_DIAGNOSTIC", False)' in source
+    assert '"kaggle_h3_queue_bounded_diagnostic.py"' in source
+    assert 'globals()["ACTION"] = "diagnostics"' in source
+    assert 'globals()["H3_AUTO_QUEUE_DIAGNOSTIC"] = False' in source
+    assert source.count('exec(compile(source, provisioner_url, "exec"), globals())') == 2
