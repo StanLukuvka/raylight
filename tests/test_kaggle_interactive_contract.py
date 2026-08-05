@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,65 @@ def test_dependency_verification_is_derived_from_config() -> None:
     assert "actual == expected" in source
     assert "kernels==0.14.0" not in source
     assert "kernels==0.16.0" not in source
+
+
+def test_workflow_is_exactly_five_frames() -> None:
+    source = _source()
+    assert "values[3] = 0.20  # exact five-frame H3 clip" in source
+    assert "values[3] = 0.25" not in source
+
+
+def test_fake_weight_mode_uses_sparse_exact_size_placeholders(tmp_path: Path) -> None:
+    tree = ast.parse(_source())
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == "_prepare_fake_model_stubs"
+    )
+    namespace = {
+        "Path": Path,
+        "APP_ROOT": str(tmp_path),
+        "REQUIRED_MODELS": [
+            {"folder": "vae", "name": "fake.safetensors", "expected_bytes": 1_000_000_000}
+        ],
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(SCRIPT), "exec"), namespace)
+    root = namespace["_prepare_fake_model_stubs"]()
+    stub = root / "vae" / "fake.safetensors"
+    assert stub.stat().st_size == 1_000_000_000
+    assert stub.stat().st_blocks * 512 < 1_000_000
+
+
+def test_incomplete_checkout_inside_app_root_is_repaired(tmp_path: Path) -> None:
+    tree = ast.parse(_source())
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == "_checkout_pinned_repo"
+    )
+    destination = tmp_path / "ComfyUI"
+    destination.mkdir()
+    (destination / "partial-file").write_text("partial")
+    commit = "a" * 40
+
+    def fake_run(command, **_kwargs):
+        if command[1] == "clone":
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / ".git").mkdir()
+        if "rev-parse" in command:
+            return SimpleNamespace(returncode=0, stdout=commit + "\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    namespace = {
+        "Path": Path,
+        "APP_ROOT": str(tmp_path),
+        "shutil": __import__("shutil"),
+        "_run": fake_run,
+        "RuntimeError": RuntimeError,
+        "print": print,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(SCRIPT), "exec"), namespace)
+    namespace["_checkout_pinned_repo"]("https://example.invalid/repo.git", destination, commit)
+    assert not (destination / "partial-file").exists()
+    assert (destination / ".git").is_dir()
 
 
 def test_all_helpers_precede_main_dispatch() -> None:

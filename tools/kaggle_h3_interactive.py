@@ -228,11 +228,20 @@ def _install_dependencies(venv_python, new_checkout):
         "assert torch.cuda.device_count() == 2, 'Expected exactly two visible GPUs'"
     )
     _run([venv_python, "-c", verify])
-    marker.write_text(str(time.time()))
+    return marker
 
 
-def _checkout_pinned_repo(url, destination, commit):
+def _checkout_pinned_repo(url, destination, commit, clean_paths=()):
     destination = Path(destination)
+    if destination.exists() and not (destination / ".git").exists():
+        app_root = Path(APP_ROOT).resolve()
+        resolved = destination.resolve()
+        if destination.is_symlink() or not resolved.is_relative_to(app_root):
+            raise RuntimeError(
+                f"Refusing to replace non-checkout outside the notebook root: {destination}"
+            )
+        print(f"Removing incomplete checkout from an earlier failed run: {destination}")
+        shutil.rmtree(destination)
     if not destination.exists():
         destination.parent.mkdir(parents=True, exist_ok=True)
         _run(["git", "clone", "--filter=blob:none", "--no-checkout", url, destination])
@@ -246,8 +255,10 @@ def _checkout_pinned_repo(url, destination, commit):
     )
     if current.returncode or current.stdout.strip() != commit:
         _run(["git", "-C", destination, "fetch", "--depth", "1", "origin", commit])
-    if current.returncode or current.stdout.strip() != commit or not (destination / "requirements.txt").exists():
-        _run(["git", "-C", destination, "checkout", "--detach", "--force", commit])
+    _run(["git", "-C", destination, "checkout", "--detach", "--force", commit])
+    _run(["git", "-C", destination, "reset", "--hard", commit])
+    for clean_path in clean_paths:
+        _run(["git", "-C", destination, "clean", "-ffd", "--", clean_path])
     actual = _run(
         ["git", "-C", destination, "rev-parse", "HEAD"],
         capture=True,
@@ -275,13 +286,18 @@ def _install_custom_nodes(venv_python):
     raylight_dir = Path(RAYLIGHT_DIR)
     marker = Path(VENV_DIR) / f".raylight_{RAYLIGHT_COMMIT}"
     try:
-        _checkout_pinned_repo(RAYLIGHT_REPO_URL, raylight_dir, RAYLIGHT_COMMIT)
+        _checkout_pinned_repo(
+            RAYLIGHT_REPO_URL,
+            raylight_dir,
+            RAYLIGHT_COMMIT,
+            clean_paths=(".",),
+        )
         if not marker.exists():
             _run([
                 venv_python, "-m", "pip", "install", "-r",
                 raylight_dir / "requirements.txt",
             ])
-            marker.write_text(RAYLIGHT_COMMIT)
+
         # Verify on every run so a stale marker cannot hide a broken environment.
         # This does not initialize CUDA or Ray workers.
         expected_versions = {
@@ -299,6 +315,15 @@ def _install_custom_nodes(venv_python):
             "*(name + '=' + actual[name] for name in sorted(actual)))"
         )
         _run([venv_python, "-c", verify_code])
+        final_check = subprocess.run(
+            [venv_python, "-m", "pip", "check"], capture_output=True, text=True
+        )
+        if final_check.returncode:
+            print(
+                "Final pip check notes from Kaggle's shared base environment:\n"
+                + (final_check.stdout + final_check.stderr).strip()
+            )
+        marker.write_text(RAYLIGHT_COMMIT)
         print(f"[✓] Raylight pinned at {RAYLIGHT_COMMIT}")
         return True
     except Exception as exc:
@@ -327,8 +352,34 @@ def _candidate_score(path, spec):
     return (0 if text.endswith(expected_tail) else 1, 0 if "minimax" in text else 1, len(path.parts), text)
 
 
+def _prepare_fake_model_stubs():
+    """Create sparse development placeholders without consuming model-sized storage."""
+    root = Path(APP_ROOT) / "FAKE_MODEL_STUBS_DO_NOT_USE_FOR_INFERENCE"
+    for spec in REQUIRED_MODELS:
+        path = root / spec["folder"] / spec["name"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        expected = int(spec["expected_bytes"])
+        if not path.exists() or path.stat().st_size != expected:
+            with path.open("wb") as handle:
+                handle.truncate(expected)
+    (root / "README.txt").write_text(
+        "Sparse fake model files for provisioning/UI iteration only.\n"
+        "They contain no model data and must never be queued for inference.\n"
+    )
+    print("\n" + "!" * 78)
+    print("FAKE MODEL MODE: services and workflow UI only; DO NOT QUEUE THE WORKFLOW.")
+    print("The placeholders use sparse logical sizes and contain no model weights.")
+    print("!" * 78 + "\n")
+    return root
+
+
 def _discover_kaggle_models():
-    roots = [Path(root) for root in MODEL_ROOTS if Path(root).exists()]
+    fake_mode = bool(globals().get("USE_FAKE_MODEL_STUBS", False))
+    roots = (
+        [_prepare_fake_model_stubs()]
+        if fake_mode
+        else [Path(root) for root in MODEL_ROOTS if Path(root).exists()]
+    )
     if not roots:
         raise RuntimeError(
             "No Kaggle Input mount exists. Attach stanlukuvka/minimax-h3-comfyui-weights and rerun."
@@ -349,11 +400,13 @@ def _discover_kaggle_models():
         size = source.stat().st_size
         if size != int(spec["expected_bytes"]):
             raise RuntimeError(f"Unexpected size for {source}: {size:,} != {spec['expected_bytes']:,}")
-        if VERIFY_MODEL_SHA256:
+        if VERIFY_MODEL_SHA256 and not fake_mode:
             actual = _sha256(source)
             if actual.lower() != spec["sha256"].lower():
                 raise RuntimeError(f"SHA256 mismatch for {source}: {actual} != {spec['sha256']}")
-        selected[name] = {"spec": spec, "source": source, "size": size}
+        selected[name] = {
+            "spec": spec, "source": source, "size": size, "fake": fake_mode
+        }
         print(f"[preflight ✓] {name}: {size / 1e9:.2f} GB at {source}")
     return selected
 
@@ -548,7 +601,7 @@ def _make_raylight_workflow(stock_workflow):
         "ulysses_degree": 2,
         "fsdp_cpu_offload": False,
         "attention": "TORCH_EFFICIENT",
-        "stock_fallback": OFFICIAL_WORKFLOW_PATH,
+        "fake_model_mode": bool(globals().get("USE_FAKE_MODEL_STUBS", False)),
     }
     return data
 
@@ -569,7 +622,7 @@ def _install_workflows():
         if any(item.get("label") == "duration" for item in inputs):
             values = node.get("widgets_values", [])
             if len(values) >= 4:
-                values[3] = 0.25  # minimum five-frame H3 clip
+                values[3] = 0.20  # exact five-frame H3 clip
             if values:
                 values[0] = (
                     "A single red ball rolls from left to right across a plain studio "
@@ -921,12 +974,18 @@ def main():
         if RESET_INSTALL and Path(APP_ROOT).exists():
             shutil.rmtree(APP_ROOT)
         existed_before = comfy_dir.exists()
-        _checkout_pinned_repo(COMFY_REPO_URL, comfy_dir, COMFY_COMMIT)
+        _checkout_pinned_repo(
+            COMFY_REPO_URL,
+            comfy_dir,
+            COMFY_COMMIT,
+            clean_paths=("custom_nodes",),
+        )
         new_checkout = not existed_before
         linked = _link_kaggle_models(selected_models)
         venv_python = _ensure_venv()
-        _install_dependencies(venv_python, new_checkout)
+        dependency_marker = _install_dependencies(venv_python, new_checkout)
         raylight_ready = _install_custom_nodes(venv_python)
+        dependency_marker.write_text(str(time.time()))
         _install_workflows()
 
         filebrowser = database = None
