@@ -1,9 +1,12 @@
 # INT8 tensorwise patches for Raylight FSDP operations.
 from __future__ import annotations
 
+import os
 from typing import Any, cast
 
 import torch
+
+from raylight.memory_trace import h3_memory_snapshot, h3_memory_trace_enabled
 
 _PATCHED = False
 _MISSING = object()
@@ -13,6 +16,20 @@ _PATCHED_LAYOUT = None
 _ORIG_QT_PRE = _MISSING
 _ORIG_QT_POST = _MISSING
 _ORIG_EAGER_INT8_LINEAR = _MISSING
+_INT8_TRACE_CALLS = 0
+
+
+def _int8_accumulator_mib() -> int:
+    raw = os.environ.get("RAYLIGHT_INT8_ACCUMULATOR_MIB", "128")
+    try:
+        accumulator_mib = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"RAYLIGHT_INT8_ACCUMULATOR_MIB must be an integer, got {raw!r}") from exc
+    if not 16 <= accumulator_mib <= 256:
+        raise ValueError(
+            f"RAYLIGHT_INT8_ACCUMULATOR_MIB must be between 16 and 256, got {accumulator_mib}"
+        )
+    return accumulator_mib
 
 
 def _bounded_eager_int8_linear(
@@ -32,6 +49,8 @@ def _bounded_eager_int8_linear(
     reaches 13.22 GiB before that final 629 MiB concatenation.  Compute GEMM rows
     in bounded pieces directly into one output allocation instead.
     """
+    global _INT8_TRACE_CALLS
+
     from comfy_kitchen.backends.eager import quantization as eager_quantization
     from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
 
@@ -60,14 +79,34 @@ def _bounded_eager_int8_linear(
     x_2d = x.reshape(-1, x.shape[-1])
     x_8, x_scale = eager_quantization.quantize_int8_rowwise(x_2d)
     m, n = x_8.shape[0], weight.shape[0]
+    accumulator_mib = _int8_accumulator_mib()
+    trace_this_linear = h3_memory_trace_enabled() and _INT8_TRACE_CALLS < 12
+    trace_call = _INT8_TRACE_CALLS
+    _INT8_TRACE_CALLS += 1
+    if trace_this_linear:
+        h3_memory_snapshot(
+            "int8_linear_start",
+            call=trace_call,
+            m=m,
+            k=x_8.shape[1],
+            n=n,
+            accumulator_mib=accumulator_mib,
+            convrot=convrot,
+        )
     output = torch.empty((m, n), dtype=out_dtype, device=x.device)
+    if trace_this_linear:
+        h3_memory_snapshot(
+            "int8_output_allocated",
+            call=trace_call,
+            output_bytes=output.numel() * output.element_size(),
+        )
     weight_t = weight.T.contiguous()
     weight_scale = weight_scale.reshape(1, -1)
     bias_out = None if bias is None else bias.to(device=x.device, dtype=out_dtype).reshape(1, -1)
 
-    # Bound the INT32 accumulator to 128 MiB. A measured 256 MiB dual-T4
-    # experiment did not improve steady step time and consumed more headroom.
-    chunk_size = max(1, min(m, 128 * 1024 * 1024 // (n * 4)))
+    # Default to the measured 128 MiB baseline. Larger canvases can lower this
+    # proactively without changing ConvRot, DTensor, or FSDP semantics.
+    chunk_size = max(1, min(m, accumulator_mib * 1024 * 1024 // (n * 4)))
     for i in range(0, m, chunk_size):
         end_i = min(i + chunk_size, m)
         accumulator = eager_quantization._int8_matmul_accumulate(x_8[i:end_i], weight_t)
@@ -78,6 +117,8 @@ def _bounded_eager_int8_linear(
         if bias_out is not None:
             output[i:end_i].add_(bias_out)
 
+    if trace_this_linear:
+        h3_memory_snapshot("int8_linear_end", call=trace_call, chunk_rows=chunk_size)
     return output.reshape(*orig_shape[:-1], weight.shape[0])
 
 

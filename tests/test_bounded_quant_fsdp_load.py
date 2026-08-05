@@ -113,12 +113,19 @@ def test_eager_int8_linear_streams_matmul_rows_into_preallocated_output():
     source = ast.unparse(bounded)
 
     assert "output = torch.empty" in source
-    assert "128 * 1024 * 1024 // (n * 4)" in source
+    assert "accumulator_mib * 1024 * 1024 // (n * 4)" in source
     assert "_int8_matmul_accumulate(x_8[i:end_i], weight_t)" in source
     assert "output[i:end_i].copy_" in source
 
     assert "scaled_parts" not in source
     assert "torch.cat" not in source
+
+
+def test_eager_int8_workspace_cap_is_runtime_configurable():
+    source = INT8_PATCH_PATH.read_text()
+    assert 'os.environ.get("RAYLIGHT_INT8_ACCUMULATOR_MIB", "128")' in source
+    assert "accumulator_mib * 1024 * 1024 // (n * 4)" in source
+    assert "16 <= accumulator_mib <= 256" in source
 
 
 def test_int8_patch_installs_and_restores_bounded_eager_kernel():

@@ -33,11 +33,20 @@ def _require_config():
     required = [
         "ACTION", "ACTIVE_PROFILE", "WORK_DIR", "VENV_DIR", "COMFY_DIR",
         "COMFY_REPO_URL", "COMFY_INSTANCES", "REQUIRED_MODELS",
-        "MODEL_ROOTS", "ENABLE_CLOUDFLARE",
+        "MODEL_ROOTS", "ENABLE_CLOUDFLARE", "H3_WIDTH", "H3_HEIGHT", "H3_LENGTH",
     ]
     missing = [name for name in required if name not in globals()]
     if missing:
         raise RuntimeError("Run Section 1 first. Missing: " + ", ".join(missing))
+    h3_width = int(globals()["H3_WIDTH"])
+    h3_height = int(globals()["H3_HEIGHT"])
+    h3_length = int(globals()["H3_LENGTH"])
+    if h3_width <= 0 or h3_height <= 0:
+        raise ValueError(f"H3 dimensions must be positive, got {h3_width}x{h3_height}")
+    if h3_width % 32 or h3_height % 32:
+        raise ValueError(f"H3 dimensions must be divisible by 32, got {h3_width}x{h3_height}")
+    if h3_length != 124:
+        raise ValueError(f"This bounded diagnostic keeps the accepted 124-frame length, got {h3_length}")
 
 
 def _run(cmd, *, cwd=None, check=True, env=None, quiet=False, capture=False):
@@ -440,6 +449,9 @@ def _link_kaggle_models(selected):
 
 def _make_raylight_workflow(stock_workflow):
     """Convert the official H3 subgraph without changing H3 packing or decoding."""
+    h3_width = int(globals()["H3_WIDTH"])
+    h3_height = int(globals()["H3_HEIGHT"])
+    h3_length = int(globals()["H3_LENGTH"])
     data = deepcopy(stock_workflow)
     subgraphs = data.get("definitions", {}).get("subgraphs", [])
     h3 = next((item for item in subgraphs if "MiniMax H3" in item.get("name", "")), None)
@@ -487,9 +499,9 @@ def _make_raylight_workflow(stock_workflow):
         "A single red ball rolls from left to right across a plain studio floor. "
         "Locked camera, one continuous shot, no text or cuts. Simple natural rolling sound."
     )
-    conditioning_values[1] = 608
-    conditioning_values[2] = 352
-    conditioning_values[3] = 124  # H3 17k+5 grid: about 5.17 seconds at 24 FPS
+    conditioning_values[1] = h3_width
+    conditioning_values[2] = h3_height
+    conditioning_values[3] = h3_length
 
     initializer = {
         "id": next_node_id,
@@ -638,6 +650,9 @@ def _make_raylight_workflow(stock_workflow):
         "fsdp_cpu_offload": False,
         "attention": "TORCH_EFFICIENT",
         "fake_model_mode": bool(globals().get("USE_FAKE_MODEL_STUBS", False)),
+        "profile": {"width": h3_width, "height": h3_height, "length": h3_length},
+        "int8_accumulator_mib": int(globals().get("INT8_ACCUMULATOR_MIB", 128)),
+        "memory_trace": bool(globals().get("H3_MEMORY_TRACE", False)),
     }
     return data
 

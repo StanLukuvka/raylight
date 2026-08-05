@@ -5,12 +5,18 @@ from comfy.ldm.minimax.model import pack_audio, patchify_video, rope_rotation_ta
 from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size, get_sp_group
 
 import raylight.distributed_modules.attention as xfuser_attn
+from raylight.memory_trace import (
+    h3_memory_snapshot,
+    h3_memory_trace_enabled,
+    h3_stop_after_first_forward,
+)
 from ..utils import pad_to_world_size
 
 
 attn_type = xfuser_attn.get_attn_type()
 sync_ulysses = xfuser_attn.get_sync_ulysses()
 xfuser_optimized_attention = xfuser_attn.make_xfuser_attention(attn_type, sync_ulysses)
+_H3_TRACE_FORWARD_DONE = False
 
 
 def _split_packed_sequence(h, rope_freqs, mod_segments):
@@ -24,7 +30,11 @@ def _split_packed_sequence(h, rope_freqs, mod_segments):
         segment_end = min(segment_end, end)
         if segment_start < segment_end:
             local_segments.append((segment_start - start, segment_end - start, row))
-    return h[start:end], rope_freqs[:, start:end], local_segments
+    # Materialize rank-local storage. Returning views would keep the complete
+    # pre-split hidden state and RoPE table alive through every DiT block.
+    local_h = h[start:end].clone()
+    local_rope = rope_freqs[:, start:end].clone()
+    return local_h, local_rope, local_segments
 
 
 def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
@@ -44,6 +54,11 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
 
 
 def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
+    global _H3_TRACE_FORWARD_DONE
+    trace_this_forward = h3_memory_trace_enabled() and not _H3_TRACE_FORWARD_DONE
+    stop_this_forward = h3_stop_after_first_forward()
+    if trace_this_forward:
+        torch.cuda.reset_peak_memory_stats()
     video_x, audio_x = x[0], x[1]
     orig_t, orig_h, orig_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
     video_x = comfy.ldm.common_dit.pad_to_patch_size(video_x, self.patch_size)
@@ -56,6 +71,13 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     latent_t, lat_h, lat_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
     audio_t = audio_x.shape[-1]
     text_len = context.shape[1]
+    if trace_this_forward:
+        h3_memory_snapshot(
+            "h3_forward_start",
+            video_shape=list(video_x.shape),
+            audio_shape=list(audio_x.shape),
+            text_len=text_len,
+        )
     # extra_conds prebuilds the layout once per sampling run
     layout = payload.get("layout")
     if layout is None or layout.signature != (text_len, latent_t, lat_h, lat_w, audio_t):
@@ -152,15 +174,29 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     # rotation table computed once per forward, consumed by the kitchen split-half rope
     rope_freqs = rope_rotation_table(self.rope_freqs(layout.position_ids, device), dtype)
     # ===================== SP SPLIT ====================== #
+    if trace_this_forward:
+        h3_memory_snapshot("h3_before_split", seq_len=layout.seq_len)
     h, h_orig_size = pad_to_world_size(h, dim=0)
     rope_freqs, _ = pad_to_world_size(rope_freqs, dim=1)
     h, rope_freqs, mod_segments = _split_packed_sequence(h, rope_freqs, mod_segments)
+
+    # These full-sequence embedding intermediates are no longer consumed once
+    # rank-local hidden state has been materialized above.
+    del video_embed, audio_embed
+    del all_video_rows, all_audio_rows, video_rows, audio_rows
+    del cond_video_rows, cond_audio_rows, text_states, context
+    del img_update, audio_update, payload, minimax_payload
+    if trace_this_forward:
+        h3_memory_snapshot("h3_after_split_release", local_rows=h.shape[0])
 
     # blocks
     patches_replace = transformer_options.get("patches_replace", {})
     blocks_replace = patches_replace.get("dit", {})
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
     for i, block in enumerate(self.blocks):
+        if trace_this_forward:
+            torch.cuda.reset_peak_memory_stats()
+            h3_memory_snapshot("h3_block_start", block=i, local_rows=h.shape[0])
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block)
         if ("double_block", i) in blocks_replace:
             def block_wrap(args):
@@ -172,10 +208,14 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
                 {"original_block": block_wrap})["img"]
         else:
             h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+        if trace_this_forward:
+            h3_memory_snapshot("h3_block_end", block=i, local_rows=h.shape[0])
     if prefetch_queue is not None:
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
 
     # ===================== SP GATHER ===================== #
+    if trace_this_forward:
+        h3_memory_snapshot("h3_before_final_gather", local_rows=h.shape[0])
     h = get_sp_group().all_gather(h.contiguous(), dim=0)
     h = h[:h_orig_size]
 
@@ -191,4 +231,12 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     # Scaling the audio velocity by d(sigma_a)/d(sigma_v) makes that ODE equal
     # to the audio stream's true ODE on its own shifted schedule.
     slope_a = time_shift_slope(sigma_v, shift_v, shift_a).to(audio_out.dtype)
+    if trace_this_forward:
+        h3_memory_snapshot("h3_forward_end", gathered_rows=h.shape[0])
+    if trace_this_forward or stop_this_forward:
+        _H3_TRACE_FORWARD_DONE = True
+    if stop_this_forward:
+        raise RuntimeError(
+            "MiniMax-H3 diagnostic intentionally stopped after the first denoiser forward"
+        )
     return [-video_out.to(video_x.dtype), (-slope_a) * audio_out.to(audio_x.dtype)]

@@ -161,6 +161,17 @@ def _inject_worker_cli_args(runtime_env: dict[str, Any]):
     runtime_env.setdefault("env_vars", {})["RAYLIGHT_COMFY_CLI_ARGS_JSON"] = _worker_cli_args_env_json()
 
 
+def _inject_h3_diagnostic_env(runtime_env: dict[str, Any]):
+    env_vars = runtime_env.setdefault("env_vars", {})
+    for name in (
+        "RAYLIGHT_INT8_ACCUMULATOR_MIB",
+        "RAYLIGHT_H3_MEMORY_TRACE",
+        "RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD",
+    ):
+        if name in os.environ:
+            env_vars[name] = os.environ[name]
+
+
 def _parse_gpu_select(gpu_select: str | None) -> tuple[int, ...] | None:
     if gpu_select is None:
         return None
@@ -600,6 +611,7 @@ class RayInitializer:
             runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
 
         _inject_worker_cli_args(runtime_env_base)
+        _inject_h3_diagnostic_env(runtime_env_base)
 
         if ray_cluster_address in _LOCAL_CLUSTER_ADDRESSES:
             _configure_raylight_ray_tmpdir(runtime_env_base)

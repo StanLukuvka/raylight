@@ -63,6 +63,17 @@ def test_ray_initializer_releases_conditioning_before_ray_init():
     assert ast.literal_eval(defaults["ray_object_store_gb"]) == 0.5
 
 
+def test_ray_runtime_env_explicitly_propagates_h3_diagnostic_controls():
+    source = NODES_PATH.read_text()
+    assert "_inject_h3_diagnostic_env(runtime_env_base)" in source
+    for name in (
+        "RAYLIGHT_INT8_ACCUMULATOR_MIB",
+        "RAYLIGHT_H3_MEMORY_TRACE",
+        "RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD",
+    ):
+        assert name in source
+
+
 def test_ray_unet_loader_accepts_conditioning_dependency_before_loading_weights():
     loader = _ray_unet_loader()
     input_types = next(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import urllib.request
 
@@ -17,6 +18,15 @@ globals().setdefault("ACTION", "start")
 globals().setdefault("USE_FAKE_MODEL_STUBS", False)
 globals().setdefault("VERIFY_MODEL_SHA256", False)
 globals().setdefault("ENABLE_CLOUDFLARE", True)
+H3_WIDTH = globals().setdefault("H3_WIDTH", 608)
+H3_HEIGHT = globals().setdefault("H3_HEIGHT", 352)
+H3_LENGTH = globals().setdefault("H3_LENGTH", 124)
+INT8_ACCUMULATOR_MIB = globals().setdefault("INT8_ACCUMULATOR_MIB", 128)
+H3_MEMORY_TRACE = globals().setdefault("H3_MEMORY_TRACE", False)
+H3_STOP_AFTER_FIRST_FORWARD = globals().setdefault("H3_STOP_AFTER_FIRST_FORWARD", False)
+os.environ["RAYLIGHT_INT8_ACCUMULATOR_MIB"] = str(INT8_ACCUMULATOR_MIB)
+os.environ["RAYLIGHT_H3_MEMORY_TRACE"] = "1" if H3_MEMORY_TRACE else "0"
+os.environ["RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD"] = "1" if H3_STOP_AFTER_FIRST_FORWARD else "0"
 
 def _default(name, value):
     globals().setdefault(name, value)
@@ -85,7 +95,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "3c1f22716fda7183cac6a8182e98581b2e7e72a3b193b0d5e34aae76a7bcc48b"
+provisioner_sha256 = "5e26f2edaebb7613cc5b8446097ee792a079648037a59923a467acdced062234"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:
