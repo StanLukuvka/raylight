@@ -7,6 +7,17 @@ SOURCE = (
 )
 
 
+def test_distributed_attention_preserves_native_inplace_rms_rope():
+    source = SOURCE.read_text()
+    attention = source[source.index("def usp_attn_forward"):source.index("def usp_dit_forward")]
+    assert "comfy.quant_ops.ck.rms_rope_split_half_(" in attention
+    assert "qw = comfy.model_management.cast_to(self.q_norm.weight" in attention
+    assert "kw = comfy.model_management.cast_to(self.k_norm.weight" in attention
+    assert "q = self.q_norm(q)" not in attention
+    assert "k = self.k_norm(k)" not in attention
+    assert "apply_rope_split_half(" not in attention
+
+
 def test_sequence_parallel_split_detaches_local_storage():
     source = SOURCE.read_text()
     assert "local_h = h[start:end].clone()" in source

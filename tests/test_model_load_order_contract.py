@@ -70,6 +70,7 @@ def test_ray_runtime_env_explicitly_propagates_h3_diagnostic_controls():
         "RAYLIGHT_INT8_ACCUMULATOR_MIB",
         "RAYLIGHT_H3_MEMORY_TRACE",
         "RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD",
+        "RAYLIGHT_H3_PHASE_PROFILE",
     ):
         assert name in source
 

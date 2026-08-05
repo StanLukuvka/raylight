@@ -653,6 +653,7 @@ def _make_raylight_workflow(stock_workflow):
         "profile": {"width": h3_width, "height": h3_height, "length": h3_length},
         "int8_accumulator_mib": int(globals().get("INT8_ACCUMULATOR_MIB", 128)),
         "memory_trace": bool(globals().get("H3_MEMORY_TRACE", False)),
+        "phase_profile": bool(globals().get("H3_PHASE_PROFILE", False)),
     }
     return data
 
@@ -1007,14 +1008,46 @@ def main():
         print_memory_diagnostics(lines=20)
         export_memory_diagnostics()
         return
-    if action not in {"start", "restart"}:
-        raise ValueError('ACTION must be "start", "restart", "stop", or "diagnostics"')
+    if action not in {"start", "restart", "int8-probe"}:
+        raise ValueError(
+            'ACTION must be "start", "restart", "stop", "diagnostics", or "int8-probe"'
+        )
 
     global SERVICE_PROCESSES
     SERVICE_PROCESSES = {}
     try:
         _print_storage()
         gpus = _accelerator_preflight()
+        if action == "int8-probe":
+            comfy_dir = Path(COMFY_DIR)
+            if RESET_INSTALL and Path(APP_ROOT).exists():
+                shutil.rmtree(APP_ROOT)
+            existed_before = comfy_dir.exists()
+            _checkout_pinned_repo(
+                COMFY_REPO_URL,
+                comfy_dir,
+                COMFY_COMMIT,
+                clean_paths=("custom_nodes",),
+            )
+            venv_python = _ensure_venv()
+            dependency_marker = _install_dependencies(venv_python, not existed_before)
+            _install_custom_nodes(venv_python)
+            dependency_marker.write_text(str(time.time()))
+            probe_command = [
+                str(venv_python),
+                str(Path(RAYLIGHT_DIR) / "tools" / "kaggle_h3_int8_backend_probe.py"),
+                "--rows", str(int(globals().get("H3_INT8_PROBE_ROWS", 128))),
+                "--warmups", str(int(globals().get("H3_INT8_PROBE_WARMUPS", 1))),
+                "--iterations", str(int(globals().get("H3_INT8_PROBE_ITERATIONS", 3))),
+                "--output-dir", str(Path(WORK_DIR) / "h3-int8-backend-probe"),
+            ]
+            if bool(globals().get("H3_INT8_PROBE_FULL_ROWS", False)):
+                probe_command.append("--full-rows")
+            if bool(globals().get("H3_INT8_PROBE_ALLOW_CUDA_UNDER_13", False)):
+                probe_command.append("--allow-cuda-under-13")
+            _run(probe_command, cwd=RAYLIGHT_DIR)
+            print(f"INT8 probe report: {Path(WORK_DIR) / 'h3-int8-backend-probe' / 'comparison.json'}")
+            return
         selected_models = _discover_kaggle_models()
         comfy_dir = Path(COMFY_DIR)
         if RESET_INSTALL and Path(APP_ROOT).exists():

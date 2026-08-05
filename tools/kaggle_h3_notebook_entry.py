@@ -24,9 +24,18 @@ H3_LENGTH = globals().setdefault("H3_LENGTH", 124)
 INT8_ACCUMULATOR_MIB = globals().setdefault("INT8_ACCUMULATOR_MIB", 128)
 H3_MEMORY_TRACE = globals().setdefault("H3_MEMORY_TRACE", False)
 H3_STOP_AFTER_FIRST_FORWARD = globals().setdefault("H3_STOP_AFTER_FIRST_FORWARD", False)
+H3_PHASE_PROFILE = globals().setdefault("H3_PHASE_PROFILE", False)
+H3_INT8_PROBE_ROWS = globals().setdefault("H3_INT8_PROBE_ROWS", 128)
+H3_INT8_PROBE_WARMUPS = globals().setdefault("H3_INT8_PROBE_WARMUPS", 1)
+H3_INT8_PROBE_ITERATIONS = globals().setdefault("H3_INT8_PROBE_ITERATIONS", 3)
+H3_INT8_PROBE_FULL_ROWS = globals().setdefault("H3_INT8_PROBE_FULL_ROWS", False)
+H3_INT8_PROBE_ALLOW_CUDA_UNDER_13 = globals().setdefault(
+    "H3_INT8_PROBE_ALLOW_CUDA_UNDER_13", False
+)
 os.environ["RAYLIGHT_INT8_ACCUMULATOR_MIB"] = str(INT8_ACCUMULATOR_MIB)
 os.environ["RAYLIGHT_H3_MEMORY_TRACE"] = "1" if H3_MEMORY_TRACE else "0"
 os.environ["RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD"] = "1" if H3_STOP_AFTER_FIRST_FORWARD else "0"
+os.environ["RAYLIGHT_H3_PHASE_PROFILE"] = "1" if H3_PHASE_PROFILE else "0"
 
 def _default(name, value):
     globals().setdefault(name, value)
@@ -95,7 +104,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "5e26f2edaebb7613cc5b8446097ee792a079648037a59923a467acdced062234"
+provisioner_sha256 = "618aec351e7ba697856e29ac16186f94cb9ab786ae2d9619fa730e465d176b34"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:

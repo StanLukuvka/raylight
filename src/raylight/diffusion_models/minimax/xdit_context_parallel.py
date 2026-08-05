@@ -6,9 +6,13 @@ from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_par
 
 import raylight.distributed_modules.attention as xfuser_attn
 from raylight.memory_trace import (
+    h3_cuda_phase_report,
     h3_memory_snapshot,
     h3_memory_trace_enabled,
+    h3_phase_profile_active,
+    h3_phase_profile_enabled,
     h3_stop_after_first_forward,
+    set_h3_phase_profile_active,
 )
 from ..utils import pad_to_world_size
 
@@ -17,6 +21,8 @@ attn_type = xfuser_attn.get_attn_type()
 sync_ulysses = xfuser_attn.get_sync_ulysses()
 xfuser_optimized_attention = xfuser_attn.make_xfuser_attention(attn_type, sync_ulysses)
 _H3_TRACE_FORWARD_DONE = False
+_H3_ATTN_PROFILE_DONE = False
+_H3_FORWARD_COUNT = 0
 
 
 def _split_packed_sequence(h, rope_freqs, mod_segments):
@@ -38,25 +44,87 @@ def _split_packed_sequence(h, rope_freqs, mod_segments):
 
 
 def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
+    global _H3_ATTN_PROFILE_DONE
+    profile_this_attention = h3_phase_profile_active() and not _H3_ATTN_PROFILE_DONE
+    phase_events = []
+
+    def mark_phase():
+        if not profile_this_attention:
+            return None
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event
+
     sequence_length = x.shape[0]
+    phase_start = mark_phase()
     q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
-    q = self.q_norm(q.view(sequence_length, self.heads, self.head_dim))
-    k = self.k_norm(k.view(sequence_length, self.heads, self.head_dim))
+    phase_end = mark_phase()
+    if profile_this_attention:
+        phase_events.append(("qkv_projection", phase_start, phase_end))
+        h3_memory_snapshot("h3_attention_after_qkv", local_rows=sequence_length)
+    phase_start = mark_phase()
     v = v.view(sequence_length, self.heads, self.head_dim)
     if rope_freqs is not None:
+        q = q.view(1, sequence_length, self.heads, self.head_dim)
+        k = k.view(1, sequence_length, self.heads, self.head_dim)
+        qw = comfy.model_management.cast_to(self.q_norm.weight, device=x.device)
+        kw = comfy.model_management.cast_to(self.k_norm.weight, device=x.device)
         rot = rope_freqs.shape[-3] * 2
-        q[..., :rot], k[..., :rot] = comfy.quant_ops.ck.apply_rope_split_half(q[..., :rot], k[..., :rot], rope_freqs)
+        if comfy.model_management.in_training:
+            q, k = comfy.quant_ops.ck.rms_rope_split_half(
+                q, k, rope_freqs, qw, kw, epsilon=self.q_norm.eps, rot_dim=rot
+            )
+        else:
+            comfy.quant_ops.ck.rms_rope_split_half_(
+                q, k, rope_freqs, qw, kw, epsilon=self.q_norm.eps, rot_dim=rot
+            )
+        q = q[0]
+        k = k[0]
+    else:
+        q = self.q_norm(q.view(sequence_length, self.heads, self.head_dim))
+        k = self.k_norm(k.view(sequence_length, self.heads, self.head_dim))
+    phase_end = mark_phase()
+    if profile_this_attention:
+        phase_events.append(("rmsnorm_rope", phase_start, phase_end))
+        h3_memory_snapshot("h3_attention_after_rmsnorm_rope", local_rows=sequence_length)
     q = q.transpose(0, 1).unsqueeze(0)
     k = k.transpose(0, 1).unsqueeze(0)
     v = v.transpose(0, 1).unsqueeze(0)
+    phase_start = mark_phase()
     out = xfuser_optimized_attention(q, k, v, self.heads, skip_reshape=True)
-    return self.out_proj(out.squeeze(0))
+    phase_end = mark_phase()
+    if profile_this_attention:
+        phase_events.append(("ulysses_attention", phase_start, phase_end))
+        h3_memory_snapshot("h3_attention_after_ulysses", local_rows=sequence_length)
+    phase_start = mark_phase()
+    result = self.out_proj(out.squeeze(0))
+    phase_end = mark_phase()
+    if profile_this_attention:
+        phase_events.append(("attention_output_projection", phase_start, phase_end))
+        h3_memory_snapshot("h3_attention_after_output_projection", local_rows=sequence_length)
+        _H3_ATTN_PROFILE_DONE = True
+        h3_cuda_phase_report(
+            phase_events,
+            local_rows=sequence_length,
+            heads=self.heads,
+            head_dim=self.head_dim,
+        )
+    return result
 
 
 def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
-    global _H3_TRACE_FORWARD_DONE
-    trace_this_forward = h3_memory_trace_enabled() and not _H3_TRACE_FORWARD_DONE
-    stop_this_forward = h3_stop_after_first_forward()
+    global _H3_FORWARD_COUNT, _H3_TRACE_FORWARD_DONE
+    phase_profile_enabled = h3_phase_profile_enabled()
+    profile_this_forward = phase_profile_enabled and _H3_FORWARD_COUNT == 1
+    set_h3_phase_profile_active(False)
+    trace_this_forward = (
+        h3_memory_trace_enabled()
+        and not _H3_TRACE_FORWARD_DONE
+        and (not phase_profile_enabled or profile_this_forward)
+    )
+    stop_this_forward = h3_stop_after_first_forward() and (
+        not phase_profile_enabled or profile_this_forward
+    )
     if trace_this_forward:
         torch.cuda.reset_peak_memory_stats()
     video_x, audio_x = x[0], x[1]
@@ -198,6 +266,8 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
             torch.cuda.reset_peak_memory_stats()
             h3_memory_snapshot("h3_block_start", block=i, local_rows=h.shape[0])
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block)
+        if profile_this_forward and i == 0:
+            set_h3_phase_profile_active(True)
         if ("double_block", i) in blocks_replace:
             def block_wrap(args):
                 return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
@@ -208,6 +278,8 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
                 {"original_block": block_wrap})["img"]
         else:
             h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+        if profile_this_forward and i == 0:
+            set_h3_phase_profile_active(False)
         if trace_this_forward:
             h3_memory_snapshot("h3_block_end", block=i, local_rows=h.shape[0])
     if prefetch_queue is not None:
@@ -235,6 +307,8 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
         h3_memory_snapshot("h3_forward_end", gathered_rows=h.shape[0])
     if trace_this_forward or stop_this_forward:
         _H3_TRACE_FORWARD_DONE = True
+    _H3_FORWARD_COUNT += 1
+    set_h3_phase_profile_active(False)
     if stop_this_forward:
         raise RuntimeError(
             "MiniMax-H3 diagnostic intentionally stopped after the first denoiser forward"

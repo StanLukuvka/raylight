@@ -19,7 +19,7 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
         urlopen.return_value.read.return_value = provisioner
         with patch.object(hashlib, "sha256") as sha256:
             sha256.return_value.hexdigest.return_value = (
-                "5e26f2edaebb7613cc5b8446097ee792a079648037a59923a467acdced062234"
+                "618aec351e7ba697856e29ac16186f94cb9ab786ae2d9619fa730e465d176b34"
             )
             # Stop before executing the real provisioner while retaining its source contract.
             urlopen.side_effect = RuntimeError("entry reached provisioner fetch")
@@ -47,6 +47,12 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
     assert namespace["INT8_ACCUMULATOR_MIB"] == 128
     assert namespace["H3_MEMORY_TRACE"] is False
     assert namespace["H3_STOP_AFTER_FIRST_FORWARD"] is False
+    assert namespace["H3_PHASE_PROFILE"] is False
+    assert namespace["H3_INT8_PROBE_ROWS"] == 128
+    assert namespace["H3_INT8_PROBE_WARMUPS"] == 1
+    assert namespace["H3_INT8_PROBE_ITERATIONS"] == 3
+    assert namespace["H3_INT8_PROBE_FULL_ROWS"] is False
+    assert namespace["H3_INT8_PROBE_ALLOW_CUDA_UNDER_13"] is False
     assert namespace["USE_FAKE_MODEL_STUBS"] is True
     assert namespace["COMFY_EXTRA_ARGS"] == [
         "--listen",
@@ -67,4 +73,8 @@ def test_notebook_entry_exports_diagnostic_memory_controls():
     assert (
         'os.environ["RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD"] = '
         '"1" if H3_STOP_AFTER_FIRST_FORWARD else "0"'
+    ) in source
+    assert (
+        'os.environ["RAYLIGHT_H3_PHASE_PROFILE"] = '
+        '"1" if H3_PHASE_PROFILE else "0"'
     ) in source

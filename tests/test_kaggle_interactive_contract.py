@@ -110,6 +110,16 @@ def test_incomplete_checkout_inside_app_root_is_repaired(tmp_path: Path) -> None
     assert (destination / ".git").is_dir()
 
 
+def test_int8_probe_action_is_isolated_from_server_startup_and_model_discovery() -> None:
+    source = _source()
+    probe_branch = source.index('if action == "int8-probe":')
+    model_discovery = source.index("selected_models = _discover_kaggle_models()")
+    server_start = source.index("        _start_memory_monitor()")
+    assert probe_branch < model_discovery < server_start
+    assert "kaggle_h3_int8_backend_probe.py" in source
+    assert 'globals().get("H3_INT8_PROBE_ALLOW_CUDA_UNDER_13", False)' in source
+
+
 def test_all_helpers_precede_main_dispatch() -> None:
     tree = ast.parse(_source())
     function_names = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]

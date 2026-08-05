@@ -6,7 +6,13 @@ from typing import Any, cast
 
 import torch
 
-from raylight.memory_trace import h3_memory_snapshot, h3_memory_trace_enabled
+from raylight.memory_trace import (
+    h3_cuda_phase_report,
+    h3_memory_snapshot,
+    h3_memory_trace_enabled,
+    h3_phase_profile_active,
+    h3_phase_profile_enabled,
+)
 
 _PATCHED = False
 _MISSING = object()
@@ -17,6 +23,14 @@ _ORIG_QT_PRE = _MISSING
 _ORIG_QT_POST = _MISSING
 _ORIG_EAGER_INT8_LINEAR = _MISSING
 _INT8_TRACE_CALLS = 0
+_INT8_PHASE_CALLS = 0
+_INT8_PHASE_EVENTS = []
+_INT8_PHASE_NAMES = {
+    (5376, 21504): "qkv_int8",
+    (7168, 5376): "attention_output_int8",
+    (5376, 28672): "fc1_int8",
+    (14336, 5376): "fc2_int8",
+}
 
 
 def _int8_accumulator_mib() -> int:
@@ -49,11 +63,20 @@ def _bounded_eager_int8_linear(
     reaches 13.22 GiB before that final 629 MiB concatenation.  Compute GEMM rows
     in bounded pieces directly into one output allocation instead.
     """
-    global _INT8_TRACE_CALLS
+    global _INT8_PHASE_CALLS, _INT8_TRACE_CALLS
 
     from comfy_kitchen.backends.eager import quantization as eager_quantization
     from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
 
+    trace_call = _INT8_TRACE_CALLS
+    phase_call = _INT8_PHASE_CALLS
+    profile_this_linear = h3_phase_profile_active() and phase_call < 4
+    if h3_phase_profile_active():
+        _INT8_PHASE_CALLS += 1
+    phase_start = None
+    if profile_this_linear:
+        phase_start = torch.cuda.Event(enable_timing=True)
+        phase_start.record()
     x = eager_quantization._apply_input_act(x, input_act)
     if x.shape[-1] != weight.shape[-1]:
         raise ValueError(
@@ -80,8 +103,15 @@ def _bounded_eager_int8_linear(
     x_8, x_scale = eager_quantization.quantize_int8_rowwise(x_2d)
     m, n = x_8.shape[0], weight.shape[0]
     accumulator_mib = _int8_accumulator_mib()
-    trace_this_linear = h3_memory_trace_enabled() and _INT8_TRACE_CALLS < 12
-    trace_call = _INT8_TRACE_CALLS
+    # Allocator snapshots can synchronize the device and contaminate CUDA-event
+    # timings. Keep detailed INT8 memory tracing and phase timing as exclusive
+    # diagnostic modes; attention-boundary snapshots remain available in the
+    # phase-profile run.
+    trace_this_linear = (
+        h3_memory_trace_enabled()
+        and not h3_phase_profile_enabled()
+        and _INT8_TRACE_CALLS < 12
+    )
     _INT8_TRACE_CALLS += 1
     if trace_this_linear:
         h3_memory_snapshot(
@@ -117,8 +147,21 @@ def _bounded_eager_int8_linear(
         if bias_out is not None:
             output[i:end_i].add_(bias_out)
 
+    phase_end = None
+    if profile_this_linear:
+        phase_end = torch.cuda.Event(enable_timing=True)
+        phase_end.record()
     if trace_this_linear:
         h3_memory_snapshot("int8_linear_end", call=trace_call, chunk_rows=chunk_size)
+    if profile_this_linear:
+        phase_name = _INT8_PHASE_NAMES.get((x_8.shape[1], n), f"int8_call_{phase_call}")
+        _INT8_PHASE_EVENTS.append((phase_name, phase_start, phase_end))
+        if phase_call == 3:
+            h3_cuda_phase_report(
+                _INT8_PHASE_EVENTS,
+                group="h3_first_block_packed_int8",
+            )
+            _INT8_PHASE_EVENTS.clear()
     return output.reshape(*orig_shape[:-1], weight.shape[0])
 
 
