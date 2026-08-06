@@ -60,6 +60,8 @@ def prompt_graph(width: int, height: int, length: int) -> dict:
                 "skip_comm_test": False,
                 "use_mmap": True,
                 "ray_object_store_gb": 0.5,
+                "ray_dashboard_address": "None",
+                "torch_dist_address": "127.0.0.1:29500",
                 "load_after": ["conditioning", 0],
             },
         },

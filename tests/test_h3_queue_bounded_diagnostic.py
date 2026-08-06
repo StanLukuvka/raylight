@@ -17,6 +17,8 @@ def test_bounded_queue_uses_exact_accepted_distributed_graph_and_two_unload_barr
         '"FSDP": True',
         '"XFuser_attention": "TORCH_EFFICIENT"',
         '"ray_object_store_gb": 0.5',
+        '"ray_dashboard_address": "None"',
+        '"torch_dist_address": "127.0.0.1:29500"',
         '"class_type": "RayUNETLoader"',
         '"class_type": "XFuserSamplerCustomAdvanced"',
     ):
