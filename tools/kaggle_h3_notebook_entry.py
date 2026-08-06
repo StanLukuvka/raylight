@@ -34,12 +34,28 @@ H3_INT8_PROBE_ALLOW_CUDA_UNDER_13 = globals().setdefault(
     "H3_INT8_PROBE_ALLOW_CUDA_UNDER_13", False
 )
 H3_AUTO_QUEUE_DIAGNOSTIC = globals().setdefault("H3_AUTO_QUEUE_DIAGNOSTIC", False)
+H3_INT8_BACKEND = str(globals().setdefault("H3_INT8_BACKEND", "eager")).strip().lower()
+H3_INT8_CUDA_ALLOW_UNDER_13 = globals().setdefault(
+    "H3_INT8_CUDA_ALLOW_UNDER_13", False
+)
+if not isinstance(H3_INT8_CUDA_ALLOW_UNDER_13, bool):
+    raise TypeError("H3_INT8_CUDA_ALLOW_UNDER_13 must be bool")
+if H3_INT8_BACKEND not in {"eager", "cuda"}:
+    raise RuntimeError(f"H3_INT8_BACKEND must be eager or cuda, got {H3_INT8_BACKEND!r}")
 if H3_AUTO_QUEUE_DIAGNOSTIC and not H3_STOP_AFTER_FIRST_FORWARD:
     raise RuntimeError("Auto-queued diagnostics require H3_STOP_AFTER_FIRST_FORWARD=True")
+if H3_INT8_BACKEND == "cuda" and not H3_STOP_AFTER_FIRST_FORWARD:
+    raise RuntimeError("CUDA INT8 backend is restricted to bounded diagnostics")
+if H3_INT8_BACKEND == "cuda" and not H3_PHASE_PROFILE:
+    raise RuntimeError("CUDA INT8 backend requires H3_PHASE_PROFILE=True")
+if H3_INT8_BACKEND == "cuda" and not H3_INT8_CUDA_ALLOW_UNDER_13:
+    raise RuntimeError("CUDA INT8 on Kaggle CUDA 12.8 requires explicit under-13 override")
 os.environ["RAYLIGHT_INT8_ACCUMULATOR_MIB"] = str(INT8_ACCUMULATOR_MIB)
 os.environ["RAYLIGHT_H3_MEMORY_TRACE"] = "1" if H3_MEMORY_TRACE else "0"
 os.environ["RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD"] = "1" if H3_STOP_AFTER_FIRST_FORWARD else "0"
 os.environ["RAYLIGHT_H3_PHASE_PROFILE"] = "1" if H3_PHASE_PROFILE else "0"
+os.environ["RAYLIGHT_INT8_BACKEND"] = H3_INT8_BACKEND
+os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13"] = "1" if H3_INT8_CUDA_ALLOW_UNDER_13 else "0"
 
 def _default(name, value):
     globals().setdefault(name, value)
@@ -108,7 +124,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "618aec351e7ba697856e29ac16186f94cb9ab786ae2d9619fa730e465d176b34"
+provisioner_sha256 = "dac9846c8d059a0ab74bffb8ff0483b0c1001b43228b6a75d925b8f9637b23c5"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:

@@ -932,6 +932,7 @@ def print_memory_diagnostics(lines=12):
 def export_memory_diagnostics():
     output = Path("/kaggle/working/h3-diagnostics.zip")
     candidates = [
+        Path(APP_ROOT) / "bounded-diagnostic-result.json",
         Path(WORK_DIR) / "memory_snapshots.jsonl",
         Path(WORK_DIR) / "memory_events_last.txt",
         Path(WORK_DIR) / "memory_monitor.log",

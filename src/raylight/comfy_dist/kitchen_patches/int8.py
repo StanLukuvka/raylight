@@ -22,6 +22,7 @@ _PATCHED_LAYOUT = None
 _ORIG_QT_PRE = _MISSING
 _ORIG_QT_POST = _MISSING
 _ORIG_EAGER_INT8_LINEAR = _MISSING
+_ORIG_CUDA_INT8_LINEAR = _MISSING
 _INT8_TRACE_CALLS = 0
 _INT8_PHASE_CALLS = 0
 _INT8_PHASE_EVENTS = []
@@ -64,6 +65,18 @@ def _bounded_eager_int8_linear(
     in bounded pieces directly into one output allocation instead.
     """
     global _INT8_PHASE_CALLS, _INT8_TRACE_CALLS
+
+    if os.environ.get("RAYLIGHT_INT8_BACKEND", "eager").strip().lower() == "cuda":
+        return _profiled_cuda_int8_linear(
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            bias=bias,
+            out_dtype=out_dtype,
+            convrot=convrot,
+            convrot_groupsize=convrot_groupsize,
+            input_act=input_act,
+        )
 
     from comfy_kitchen.backends.eager import quantization as eager_quantization
     from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
@@ -165,6 +178,62 @@ def _bounded_eager_int8_linear(
     return output.reshape(*orig_shape[:-1], weight.shape[0])
 
 
+def _profiled_cuda_int8_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+    convrot: bool = False,
+    convrot_groupsize: int = 256,
+    input_act: str | None = None,
+) -> torch.Tensor:
+    """Time the four first-block CUDA INT8 calls without per-op synchronization."""
+    global _INT8_PHASE_CALLS
+
+    if os.environ.get("RAYLIGHT_INT8_BACKEND", "eager").strip().lower() != "cuda":
+        raise RuntimeError(
+            "Eager INT8 requested but Comfy Kitchen selected CUDA backend"
+        )
+    phase_call = _INT8_PHASE_CALLS
+    profile_this_linear = h3_phase_profile_active() and phase_call < 4
+    if h3_phase_profile_active():
+        _INT8_PHASE_CALLS += 1
+    phase_start = None
+    if profile_this_linear:
+        phase_start = torch.cuda.Event(enable_timing=True)
+        phase_start.record()
+
+    result = cast(Any, _ORIG_CUDA_INT8_LINEAR)(
+        x=x,
+        weight=weight,
+        weight_scale=weight_scale,
+        bias=bias,
+        out_dtype=out_dtype,
+        convrot=convrot,
+        convrot_groupsize=convrot_groupsize,
+        input_act=input_act,
+    )
+
+    if profile_this_linear:
+        phase_end = torch.cuda.Event(enable_timing=True)
+        phase_end.record()
+        activated_k = x.shape[-1] // (2 if input_act == "swiglu" else 1)
+        phase_name = _INT8_PHASE_NAMES.get(
+            (activated_k, weight.shape[0]), f"int8_call_{phase_call}"
+        )
+        _INT8_PHASE_EVENTS.append((phase_name, phase_start, phase_end))
+        if phase_call == 3:
+            h3_cuda_phase_report(
+                _INT8_PHASE_EVENTS,
+                group="h3_first_block_cuda_int8",
+                backend="cuda",
+                rank=int(os.environ.get("RAYLIGHT_RANK", "-1")),
+            )
+            _INT8_PHASE_EVENTS.clear()
+    return result
+
+
 def _get_op(path: str) -> Any:
     cur = torch
     for part in path.split(".")[1:]:
@@ -177,17 +246,20 @@ def _get_op(path: str) -> Any:
 def install_int8_patches() -> None:
     global _PATCHED
     global _ORIG_LAYOUT_PRE, _ORIG_LAYOUT_POST, _PATCHED_LAYOUT, _ORIG_QT_PRE, _ORIG_QT_POST
-    global _ORIG_EAGER_INT8_LINEAR
+    global _ORIG_EAGER_INT8_LINEAR, _ORIG_CUDA_INT8_LINEAR
     if _PATCHED:
         return
 
     from comfy_kitchen.tensor.base import QuantizedTensor, register_layout_op
     from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout as KitchenTensorWiseINT8Layout
+    from comfy_kitchen.backends import cuda as cuda_backend
     from comfy_kitchen.backends import eager as eager_backend
 
     if _ORIG_EAGER_INT8_LINEAR is _MISSING:
         _ORIG_EAGER_INT8_LINEAR = eager_backend.int8_linear
     eager_backend.int8_linear = _bounded_eager_int8_linear
+    if _ORIG_CUDA_INT8_LINEAR is _MISSING:
+        _ORIG_CUDA_INT8_LINEAR = cuda_backend.int8_linear
 
     try:
         from comfy.quant_ops import get_layout_class as comfy_get_layout_class
@@ -509,7 +581,7 @@ def install_int8_patches() -> None:
 def restore_int8_patches() -> None:
     global _PATCHED
     global _ORIG_LAYOUT_PRE, _ORIG_LAYOUT_POST, _PATCHED_LAYOUT, _ORIG_QT_PRE, _ORIG_QT_POST
-    global _ORIG_EAGER_INT8_LINEAR
+    global _ORIG_EAGER_INT8_LINEAR, _ORIG_CUDA_INT8_LINEAR
 
     from comfy_kitchen.tensor.base import QuantizedTensor
     from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout as KitchenTensorWiseINT8Layout
@@ -550,4 +622,5 @@ def restore_int8_patches() -> None:
     _ORIG_QT_PRE = _MISSING
     _ORIG_QT_POST = _MISSING
     _ORIG_EAGER_INT8_LINEAR = _MISSING
+    _ORIG_CUDA_INT8_LINEAR = _MISSING
     _PATCHED = False

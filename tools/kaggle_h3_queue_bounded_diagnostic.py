@@ -230,7 +230,21 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=416)
     parser.add_argument("--length", type=int, default=124)
     args = parser.parse_args()
-    print(json.dumps(run(args.width, args.height, args.length), indent=2, sort_keys=True))
+    try:
+        result = run(args.width, args.height, args.length)
+    except Exception as exc:
+        result = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "width": args.width,
+            "height": args.height,
+            "length": args.length,
+        }
+        RESULT.parent.mkdir(parents=True, exist_ok=True)
+        RESULT.write_text(json.dumps(result, indent=2, sort_keys=True))
+        raise
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

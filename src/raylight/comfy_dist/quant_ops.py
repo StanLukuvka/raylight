@@ -2,6 +2,7 @@ import comfy_kitchen as ck
 from functools import wraps
 from comfy_kitchen.tensor import TensorCoreFP8Layout, TensorCoreNVFP4Layout
 
+
 _PATCH_INSTALL_LOGGED = False
 _FP8_FALLBACK_LOGGED = False
 _NVFP4_FALLBACK_LOGGED = False
@@ -79,7 +80,8 @@ def patch_temp_fix_ck_ops(func):
                         )
                 )
 
-            return func(*args, **kwargs)
+            with ck.use_backend("eager"):
+                return func(*args, **kwargs)
 
         finally:
             if original_fp8 is not None:

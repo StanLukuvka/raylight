@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 RUNNER = ROOT / "tools/kaggle_h3_queue_bounded_diagnostic.py"
+PROVISIONER = ROOT / "tools/kaggle_h3_interactive.py"
 
 
 def test_bounded_queue_uses_exact_accepted_distributed_graph_and_two_unload_barriers():
@@ -34,3 +35,11 @@ def test_bounded_queue_is_shape_configurable_and_accepts_only_the_intentional_st
     assert '"execution_error"' in source
     assert '"completed_without_intentional_stop"' in source
     assert "60 * 20" in source
+
+
+def test_bounded_queue_persists_structured_result_for_every_failure():
+    source = RUNNER.read_text()
+    assert '"status": "failed"' in source
+    assert '"error_type": type(exc).__name__' in source
+    assert "RESULT.write_text" in source
+    assert 'Path(APP_ROOT) / "bounded-diagnostic-result.json"' in PROVISIONER.read_text()

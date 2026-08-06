@@ -168,6 +168,8 @@ def _inject_h3_diagnostic_env(runtime_env: dict[str, Any]):
         "RAYLIGHT_H3_MEMORY_TRACE",
         "RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD",
         "RAYLIGHT_H3_PHASE_PROFILE",
+        "RAYLIGHT_INT8_BACKEND",
+        "RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13",
     ):
         if name in os.environ:
             env_vars[name] = os.environ[name]

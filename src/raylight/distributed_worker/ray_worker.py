@@ -4,9 +4,15 @@ import gc
 import json
 import logging
 import functools
+import importlib.metadata
 from datetime import timedelta
 
 import torch
+from raylight.kitchen_backend_policy import initialize_worker_int8_backend
+
+
+_WORKER_INT8_BACKEND, _WORKER_COMFY_KITCHEN = initialize_worker_int8_backend(torch)
+
 import torch.distributed as dist
 from torch.distributed.fsdp import FSDPModule
 import ray
@@ -390,6 +396,7 @@ class RayWorker:
         self.active_request_key = None
 
         self.local_rank = local_rank
+        os.environ["RAYLIGHT_RANK"] = str(self.local_rank)
         self.global_world_size = self.parallel_dict["global_world_size"]
         self.shard_size = self.parallel_dict["shard_size"]
         self.group_id = self.parallel_dict.get("group_id", 0)
@@ -399,6 +406,24 @@ class RayWorker:
         self.device = torch.device(f"cuda:{self.device_id}")
         self.device_mesh = None
         self.compute_capability = int("{}{}".format(*torch.cuda.get_device_capability()))
+        print(
+            "[raylight-int8-policy] "
+            + json.dumps(
+                {
+                    "marker": "raylight_int8_backend_policy",
+                    "rank": self.local_rank,
+                    "backend": _WORKER_INT8_BACKEND,
+                    "cuda_runtime": torch.version.cuda,
+                    "compute_capability": self.compute_capability,
+                    "comfy_kitchen": importlib.metadata.version("comfy-kitchen"),
+                    "backend_status": _WORKER_COMFY_KITCHEN.list_backends().get(
+                        _WORKER_INT8_BACKEND, {}
+                    ),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         self.pipefusion_config = PipeFusionConfig.from_parallel_dict(self.parallel_dict)
         self.pipefusion_stage = None
         self.xfuser_parallel = None

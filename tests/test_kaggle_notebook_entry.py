@@ -2,6 +2,8 @@ import hashlib
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 ENTRY_PATH = Path(__file__).parents[1] / "tools" / "kaggle_h3_notebook_entry.py"
 PROVISIONER_PATH = Path(__file__).parents[1] / "tools" / "kaggle_h3_interactive.py"
@@ -19,7 +21,7 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
         urlopen.return_value.read.return_value = provisioner
         with patch.object(hashlib, "sha256") as sha256:
             sha256.return_value.hexdigest.return_value = (
-                "618aec351e7ba697856e29ac16186f94cb9ab786ae2d9619fa730e465d176b34"
+                "dac9846c8d059a0ab74bffb8ff0483b0c1001b43228b6a75d925b8f9637b23c5"
             )
             # Stop before executing the real provisioner while retaining its source contract.
             urlopen.side_effect = RuntimeError("entry reached provisioner fetch")
@@ -54,6 +56,8 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
     assert namespace["H3_INT8_PROBE_FULL_ROWS"] is False
     assert namespace["H3_INT8_PROBE_ALLOW_CUDA_UNDER_13"] is False
     assert namespace["H3_AUTO_QUEUE_DIAGNOSTIC"] is False
+    assert namespace["H3_INT8_BACKEND"] == "eager"
+    assert namespace["H3_INT8_CUDA_ALLOW_UNDER_13"] is False
     assert namespace["USE_FAKE_MODEL_STUBS"] is True
     assert namespace["COMFY_EXTRA_ARGS"] == [
         "--listen",
@@ -79,6 +83,36 @@ def test_notebook_entry_exports_diagnostic_memory_controls():
         'os.environ["RAYLIGHT_H3_PHASE_PROFILE"] = '
         '"1" if H3_PHASE_PROFILE else "0"'
     ) in source
+    assert 'os.environ["RAYLIGHT_INT8_BACKEND"] = H3_INT8_BACKEND' in source
+    assert (
+        'os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13"] = '
+        '"1" if H3_INT8_CUDA_ALLOW_UNDER_13 else "0"'
+    ) in source
+
+
+def test_notebook_entry_pins_the_current_provisioner_bytes():
+    source = ENTRY_PATH.read_text()
+    expected = hashlib.sha256(PROVISIONER_PATH.read_bytes()).hexdigest()
+    assert f'provisioner_sha256 = "{expected}"' in source
+
+
+def test_notebook_entry_refuses_unbounded_cuda_int8():
+    source = ENTRY_PATH.read_text()
+    guard = source.index("CUDA INT8 backend is restricted to bounded diagnostics")
+    phase_guard = source.index("CUDA INT8 backend requires H3_PHASE_PROFILE=True")
+    provision = source.index("provisioner_url =")
+    assert guard < phase_guard < provision
+
+
+def test_notebook_entry_rejects_string_abi_override_instead_of_truthiness():
+    namespace = {
+        "RAYLIGHT_COMMIT": "1" * 40,
+        "ACTION": "status",
+        "USE_FAKE_MODEL_STUBS": True,
+        "H3_INT8_CUDA_ALLOW_UNDER_13": "false",
+    }
+    with pytest.raises(TypeError, match="H3_INT8_CUDA_ALLOW_UNDER_13 must be bool"):
+        exec(compile(ENTRY_PATH.read_text(), str(ENTRY_PATH), "exec"), namespace)  # noqa: S102
 
 
 def test_notebook_entry_can_queue_and_package_only_the_explicit_bounded_diagnostic():
