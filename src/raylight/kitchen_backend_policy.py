@@ -44,12 +44,18 @@ def initialize_worker_int8_backend(
                 "CUDA runtime below 13 requires "
                 "RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13=1 before importing Comfy Kitchen"
             )
-        if (
+        bounded_diagnostic = (
+            os.environ.get("RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD") == "1"
+            and os.environ.get("RAYLIGHT_H3_PHASE_PROFILE") == "1"
+        )
+        unbounded_approved = (
             os.environ.get("RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD") != "1"
-            or os.environ.get("RAYLIGHT_H3_PHASE_PROFILE") != "1"
-        ):
+            and os.environ.get("RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED") == "1"
+        )
+        if not bounded_diagnostic and not unbounded_approved:
             raise RuntimeError(
-                "CUDA INT8 worker requires bounded stop and phase profile controls"
+                "CUDA INT8 worker requires bounded stop and phase profile controls "
+                "or RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED=1"
             )
         if str(torch_module.version.cuda) != "12.8":
             raise RuntimeError(

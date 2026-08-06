@@ -38,15 +38,24 @@ H3_INT8_BACKEND = str(globals().setdefault("H3_INT8_BACKEND", "eager")).strip().
 H3_INT8_CUDA_ALLOW_UNDER_13 = globals().setdefault(
     "H3_INT8_CUDA_ALLOW_UNDER_13", False
 )
+H3_INT8_CUDA_ALLOW_UNBOUNDED = globals().setdefault(
+    "H3_INT8_CUDA_ALLOW_UNBOUNDED", False
+)
 if not isinstance(H3_INT8_CUDA_ALLOW_UNDER_13, bool):
     raise TypeError("H3_INT8_CUDA_ALLOW_UNDER_13 must be bool")
+if not isinstance(H3_INT8_CUDA_ALLOW_UNBOUNDED, bool):
+    raise TypeError("H3_INT8_CUDA_ALLOW_UNBOUNDED must be bool")
 if H3_INT8_BACKEND not in {"eager", "cuda"}:
     raise RuntimeError(f"H3_INT8_BACKEND must be eager or cuda, got {H3_INT8_BACKEND!r}")
 if H3_AUTO_QUEUE_DIAGNOSTIC and not H3_STOP_AFTER_FIRST_FORWARD:
     raise RuntimeError("Auto-queued diagnostics require H3_STOP_AFTER_FIRST_FORWARD=True")
-if H3_INT8_BACKEND == "cuda" and not H3_STOP_AFTER_FIRST_FORWARD:
+if (
+    H3_INT8_BACKEND == "cuda"
+    and not H3_STOP_AFTER_FIRST_FORWARD
+    and not H3_INT8_CUDA_ALLOW_UNBOUNDED
+):
     raise RuntimeError("CUDA INT8 backend is restricted to bounded diagnostics")
-if H3_INT8_BACKEND == "cuda" and not H3_PHASE_PROFILE:
+if H3_INT8_BACKEND == "cuda" and H3_STOP_AFTER_FIRST_FORWARD and not H3_PHASE_PROFILE:
     raise RuntimeError("CUDA INT8 backend requires H3_PHASE_PROFILE=True")
 if H3_INT8_BACKEND == "cuda" and not H3_INT8_CUDA_ALLOW_UNDER_13:
     raise RuntimeError("CUDA INT8 on Kaggle CUDA 12.8 requires explicit under-13 override")
@@ -56,6 +65,9 @@ os.environ["RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD"] = "1" if H3_STOP_AFTER_FIRST_
 os.environ["RAYLIGHT_H3_PHASE_PROFILE"] = "1" if H3_PHASE_PROFILE else "0"
 os.environ["RAYLIGHT_INT8_BACKEND"] = H3_INT8_BACKEND
 os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13"] = "1" if H3_INT8_CUDA_ALLOW_UNDER_13 else "0"
+os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED"] = (
+    "1" if H3_INT8_CUDA_ALLOW_UNBOUNDED else "0"
+)
 
 def _default(name, value):
     globals().setdefault(name, value)

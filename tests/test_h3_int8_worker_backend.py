@@ -155,6 +155,43 @@ def test_cuda_worker_bootstrap_requires_bounded_profile_before_import(monkeypatc
     assert imported == []
 
 
+def test_cuda_worker_accepts_explicit_unbounded_post_gate_run(monkeypatch):
+    policy = _load_policy()
+    monkeypatch.setenv("RAYLIGHT_INT8_BACKEND", "cuda")
+    monkeypatch.setenv("RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13", "1")
+    monkeypatch.setenv("RAYLIGHT_H3_STOP_AFTER_FIRST_FORWARD", "0")
+    monkeypatch.setenv("RAYLIGHT_H3_PHASE_PROFILE", "0")
+    monkeypatch.setenv("RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED", "1")
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def get_device_capability():
+            return (7, 5)
+
+    class FakeTorch:
+        cuda = FakeCuda()
+        version = type("Version", (), {"cuda": "12.8"})()
+
+    class FakeKitchen:
+        @staticmethod
+        def list_backends():
+            return {"cuda": {"available": True, "disabled": True}}
+
+    backend, _ = policy.initialize_worker_int8_backend(
+        FakeTorch(), import_kitchen=lambda name: FakeKitchen()
+    )
+    assert backend == "cuda"
+
+
+def test_runtime_env_propagates_unbounded_cuda_approval_to_each_ray_worker():
+    source = (ROOT / "src/raylight/nodes.py").read_text()
+    assert '"RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED"' in source
+
+
 def test_worker_emits_rank_specific_backend_evidence():
     source = (ROOT / "src/raylight/distributed_worker/ray_worker.py").read_text()
     assert 'os.environ["RAYLIGHT_RANK"] = str(self.local_rank)' in source

@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -96,12 +97,35 @@ def test_notebook_entry_pins_the_current_provisioner_bytes():
     assert f'provisioner_sha256 = "{expected}"' in source
 
 
-def test_notebook_entry_refuses_unbounded_cuda_int8():
-    source = ENTRY_PATH.read_text()
-    guard = source.index("CUDA INT8 backend is restricted to bounded diagnostics")
-    phase_guard = source.index("CUDA INT8 backend requires H3_PHASE_PROFILE=True")
-    provision = source.index("provisioner_url =")
-    assert guard < phase_guard < provision
+def test_notebook_entry_refuses_unbounded_cuda_int8_without_post_gate_approval():
+    namespace = {
+        "RAYLIGHT_COMMIT": "1" * 40,
+        "ACTION": "status",
+        "USE_FAKE_MODEL_STUBS": True,
+        "H3_INT8_BACKEND": "cuda",
+        "H3_INT8_CUDA_ALLOW_UNDER_13": True,
+        "H3_STOP_AFTER_FIRST_FORWARD": False,
+        "H3_PHASE_PROFILE": False,
+    }
+    with pytest.raises(RuntimeError, match="restricted to bounded diagnostics"):
+        exec(compile(ENTRY_PATH.read_text(), str(ENTRY_PATH), "exec"), namespace)  # noqa: S102
+
+
+def test_notebook_entry_allows_explicit_unbounded_cuda_after_gate(monkeypatch):
+    namespace = {
+        "RAYLIGHT_COMMIT": "1" * 40,
+        "ACTION": "status",
+        "USE_FAKE_MODEL_STUBS": True,
+        "H3_INT8_BACKEND": "cuda",
+        "H3_INT8_CUDA_ALLOW_UNDER_13": True,
+        "H3_INT8_CUDA_ALLOW_UNBOUNDED": True,
+        "H3_STOP_AFTER_FIRST_FORWARD": False,
+        "H3_PHASE_PROFILE": False,
+    }
+    with patch("urllib.request.urlopen", side_effect=RuntimeError("entry reached provisioner fetch")):
+        with pytest.raises(RuntimeError, match="entry reached provisioner fetch"):
+            exec(compile(ENTRY_PATH.read_text(), str(ENTRY_PATH), "exec"), namespace)  # noqa: S102
+    assert os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED"] == "1"
 
 
 def test_notebook_entry_rejects_string_abi_override_instead_of_truthiness():
