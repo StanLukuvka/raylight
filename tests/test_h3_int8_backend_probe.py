@@ -31,6 +31,15 @@ def test_probe_fails_closed_for_cuda_below_13_without_explicit_override():
     assert guard_pos < import_pos < enable_pos
 
 
+def test_probe_adds_comfyui_root_before_importing_raylight_patches():
+    source = PROBE.read_text()
+    comfy_path_pos = source.index("comfy_root = root.parents[1]")
+    raylight_import_pos = source.index(
+        "from raylight.comfy_dist.kitchen_patches.int8 import install_int8_patches"
+    )
+    assert comfy_path_pos < raylight_import_pos
+
+
 def test_probe_reports_timing_memory_and_numerical_comparison():
     source = PROBE.read_text()
     for field in (

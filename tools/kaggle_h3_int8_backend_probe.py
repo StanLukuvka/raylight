@@ -58,7 +58,10 @@ def _run_backend(args) -> dict:
     import comfy_kitchen as ck
 
     root = Path(__file__).resolve().parents[1]
+    comfy_root = root.parents[1]
     src = root / "src"
+    if str(comfy_root) not in sys.path:
+        sys.path.insert(0, str(comfy_root))
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
     from raylight.comfy_dist.kitchen_patches.int8 import install_int8_patches
