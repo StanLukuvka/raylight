@@ -12,6 +12,11 @@ from .ray_patch_decorator import ray_patch_with_return
 
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise
 from raylight.load_telemetry import emit_load_event, load_phase
+from raylight.worker_cleanup import (
+    run_lifecycle_or_shutdown,
+    shutdown_workers,
+    submit_results,
+)
 
 
 def _make_ray_guider(ray_actors, guider_type, **kwargs):
@@ -434,7 +439,10 @@ class XFuserSamplerCustomAdvanced:
                 "sampler": ("SAMPLER",),
                 "sigmas": ("SIGMAS",),
                 "latent_image": ("LATENT",),
-            }
+            },
+            "optional": {
+                "shutdown_after_sampling": ("BOOLEAN", {"default": False}),
+            },
         }
 
     RETURN_TYPES = ("LATENT", "LATENT", "RAY_ACTORS")
@@ -442,36 +450,69 @@ class XFuserSamplerCustomAdvanced:
     FUNCTION = "ray_sample"
     CATEGORY = "Raylight/extra/custom_sampling/samplers"
 
-    def ray_sample(self, add_noise, noise_seed, guider, sampler, sigmas, latent_image):
+    def ray_sample(
+        self,
+        add_noise,
+        noise_seed,
+        guider,
+        sampler,
+        sigmas,
+        latent_image,
+        shutdown_after_sampling=False,
+    ):
         ray_actors = _extract_ray_actors_from_guider(guider)
         gpu_actors = ray_actors["workers"]
-        sigma_count = int(sigmas.numel()) if hasattr(sigmas, "numel") else len(sigmas)
-        with load_phase("sampling_prepare", worker_count=len(gpu_actors), sigma_count=sigma_count):
-            gc.collect()
-            comfy.model_management.unload_all_models()
-            comfy.model_management.soft_empty_cache()
-        with load_phase(
-            "sampling_dispatch",
-            worker_count=len(gpu_actors),
-            sigma_count=sigma_count,
-            add_noise=bool(add_noise),
-        ):
-            futures = [
-                actor.custom_sampler_advanced.remote(
-                    add_noise,
-                    noise_seed,
-                    guider,
-                    sampler,
-                    sigmas,
-                    latent_image,
+        def sampling_lifecycle():
+            sigma_count = int(sigmas.numel()) if hasattr(sigmas, "numel") else len(sigmas)
+            with load_phase("sampling_prepare", worker_count=len(gpu_actors), sigma_count=sigma_count):
+                gc.collect()
+                comfy.model_management.unload_all_models()
+                comfy.model_management.soft_empty_cache()
+            with load_phase(
+                "sampling_dispatch",
+                worker_count=len(gpu_actors),
+                sigma_count=sigma_count,
+                add_noise=bool(add_noise),
+            ):
+                results = submit_results(
+                    ray,
+                    gpu_actors,
+                    lambda _index, actor: actor.custom_sampler_advanced.remote(
+                        add_noise,
+                        noise_seed,
+                        guider,
+                        sampler,
+                        sigmas,
+                        latent_image,
+                    ),
                 )
-                for actor in gpu_actors
-            ]
-            results = ray.get(futures)
-        emit_load_event("sampling_complete", worker_count=len(gpu_actors), sigma_count=sigma_count)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        output, denoised_output = results[0]
-        return (output, denoised_output, ray_actors)
+            emit_load_event("sampling_complete", worker_count=len(gpu_actors), sigma_count=sigma_count)
+            output, denoised_output = results[0]
+            if shutdown_after_sampling:
+                shutdown_result = shutdown_workers(ray, gpu_actors, timeout_seconds=30.0)
+                emit_load_event(
+                    "worker_shutdown_result",
+                    status=str(shutdown_result["status"]),
+                    worker_count=len(gpu_actors),
+                    reason="sampling_complete",
+                    error_type=shutdown_result.get("error_type"),
+                    force_error_type=shutdown_result.get("force_error_type"),
+                    unconfirmed_worker_count=shutdown_result.get("unconfirmed_worker_count"),
+                )
+                if shutdown_result["status"] == "force_unconfirmed":
+                    raise RuntimeError(
+                        "Sampling completed, but denoiser worker termination could not be confirmed"
+                    )
+            else:
+                _clear_ray_worker_vram_after_sampling(ray_actors)
+            return (output, denoised_output, ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class XFuserSamplerCustom:
@@ -527,27 +568,35 @@ class XFuserSamplerCustom:
         sigmas,
         latent_image,
     ):
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
         gpu_actors = ray_actors["workers"]
-        futures = [
-            actor.custom_sampler.remote(
-                add_noise,
-                noise_seed,
-                cfg,
-                positive,
-                negative,
-                sampler,
-                sigmas,
-                latent_image,
+
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda _index, actor: actor.custom_sampler.remote(
+                    add_noise,
+                    noise_seed,
+                    cfg,
+                    positive,
+                    negative,
+                    sampler,
+                    sigmas,
+                    latent_image,
+                ),
             )
-            for actor in gpu_actors
-        ]
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        out = results[0]
-        return (out, ray_actors)
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            return (results[0], ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class UnifiedParallelSamplerCustomAdvanced:
@@ -576,38 +625,56 @@ class UnifiedParallelSamplerCustomAdvanced:
         sampler = sampler[0]
         sigmas = sigmas[0]
 
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-
         initial_ray_actors = _extract_ray_actors_from_guider(guider[0])
         gpu_actors = initial_ray_actors["workers"]
-        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-        group_infos = ray.get([actor.get_exec_group_info.remote() for actor in gpu_actors])
-        _validate_unified_parallel_setup(parallel_dict, group_infos, "Unified Parallel SamplerCustomAdvanced")
-        dp_degree = int(group_infos[0]["dp_degree"])
 
-        noise_list = _normalize_grouped_inputs(noise_list, dp_degree, "noise_list")
-        guider, ray_actors = _normalize_grouped_guiders(guider, dp_degree)
-        latent_image = _normalize_grouped_inputs(latent_image, dp_degree, "latent_image")
-
-        futures = [
-            actor.custom_sampler_advanced.remote(
-                add_noise,
-                noise_list[group_info["dp_rank"]],
-                guider[group_info["dp_rank"]],
-                sampler,
-                sigmas,
-                latent_image[group_info["dp_rank"]],
-                grouped_output=True,
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+            group_infos = ray.get([actor.get_exec_group_info.remote() for actor in gpu_actors])
+            _validate_unified_parallel_setup(
+                parallel_dict,
+                group_infos,
+                "Unified Parallel SamplerCustomAdvanced",
             )
-            for actor, group_info in zip(gpu_actors, group_infos)
-        ]
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        results = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustomAdvanced")
-        outputs, denoised_outputs = _split_advanced_results(results)
-        return (outputs, denoised_outputs, ray_actors)
+            dp_degree = int(group_infos[0]["dp_degree"])
+            normalized_noise = _normalize_grouped_inputs(noise_list, dp_degree, "noise_list")
+            normalized_guider, ray_actors = _normalize_grouped_guiders(guider, dp_degree)
+            normalized_latent = _normalize_grouped_inputs(
+                latent_image,
+                dp_degree,
+                "latent_image",
+            )
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda index, actor: actor.custom_sampler_advanced.remote(
+                    add_noise,
+                    normalized_noise[group_infos[index]["dp_rank"]],
+                    normalized_guider[group_infos[index]["dp_rank"]],
+                    sampler,
+                    sigmas,
+                    normalized_latent[group_infos[index]["dp_rank"]],
+                    grouped_output=True,
+                ),
+            )
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            results = _collect_grouped_results(
+                results,
+                dp_degree,
+                "Unified Parallel SamplerCustomAdvanced",
+            )
+            outputs, denoised_outputs = _split_advanced_results(results)
+            return (outputs, denoised_outputs, ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class UnifiedParallelSamplerCustom:
@@ -663,37 +730,57 @@ class UnifiedParallelSamplerCustom:
         sampler = sampler[0]
         sigmas = sigmas[0]
 
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
         gpu_actors = ray_actors["workers"]
-        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-        group_infos = ray.get([actor.get_exec_group_info.remote() for actor in gpu_actors])
-        _validate_unified_parallel_setup(parallel_dict, group_infos, "Unified Parallel SamplerCustom")
-        dp_degree = int(group_infos[0]["dp_degree"])
-        noise_list = _normalize_grouped_inputs(noise_list, dp_degree, "noise_list")
-        positive = _normalize_grouped_inputs(positive, dp_degree, "positive")
-        negative = _normalize_grouped_inputs(negative, dp_degree, "negative")
-        latent_image = _normalize_grouped_inputs(latent_image, dp_degree, "latent_image")
 
-        futures = [
-            actor.custom_sampler.remote(
-                add_noise,
-                noise_list[group_info["dp_rank"]],
-                cfg,
-                positive[group_info["dp_rank"]],
-                negative[group_info["dp_rank"]],
-                sampler,
-                sigmas,
-                latent_image[group_info["dp_rank"]],
-                grouped_output=True,
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+            group_infos = ray.get([actor.get_exec_group_info.remote() for actor in gpu_actors])
+            _validate_unified_parallel_setup(
+                parallel_dict,
+                group_infos,
+                "Unified Parallel SamplerCustom",
             )
-            for actor, group_info in zip(gpu_actors, group_infos)
-        ]
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        out = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustom")
-        return (out, ray_actors)
+            dp_degree = int(group_infos[0]["dp_degree"])
+            normalized_noise = _normalize_grouped_inputs(noise_list, dp_degree, "noise_list")
+            normalized_positive = _normalize_grouped_inputs(positive, dp_degree, "positive")
+            normalized_negative = _normalize_grouped_inputs(negative, dp_degree, "negative")
+            normalized_latent = _normalize_grouped_inputs(
+                latent_image,
+                dp_degree,
+                "latent_image",
+            )
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda index, actor: actor.custom_sampler.remote(
+                    add_noise,
+                    normalized_noise[group_infos[index]["dp_rank"]],
+                    cfg,
+                    normalized_positive[group_infos[index]["dp_rank"]],
+                    normalized_negative[group_infos[index]["dp_rank"]],
+                    sampler,
+                    sigmas,
+                    normalized_latent[group_infos[index]["dp_rank"]],
+                    grouped_output=True,
+                ),
+            )
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            out = _collect_grouped_results(
+                results,
+                dp_degree,
+                "Unified Parallel SamplerCustom",
+            )
+            return (out, ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class DPSamplerCustomAdvanced:
@@ -722,33 +809,43 @@ class DPSamplerCustomAdvanced:
         sampler = sampler[0]
         sigmas = sigmas[0]
 
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-
         initial_ray_actors = _extract_ray_actors_from_guider(guider[0])
         gpu_actors = initial_ray_actors["workers"]
-        num_gpus = len(gpu_actors)
 
-        guider, ray_actors = _normalize_grouped_guiders(guider, num_gpus)
-        latent_image = _normalize_grouped_inputs(latent_image, num_gpus, "latent_image")
-        noise_list = _normalize_grouped_inputs(noise_list, num_gpus, "noise_list")
-
-        futures = [
-            actor.custom_sampler_advanced.remote(
-                add_noise,
-                noise_list[i],
-                guider[i],
-                sampler,
-                sigmas,
-                latent_image[i],
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            num_gpus = len(gpu_actors)
+            normalized_guider, ray_actors = _normalize_grouped_guiders(guider, num_gpus)
+            normalized_latent = _normalize_grouped_inputs(
+                latent_image,
+                num_gpus,
+                "latent_image",
             )
-            for i, actor in enumerate(gpu_actors)
-        ]
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        outputs, denoised_outputs = _split_advanced_results(results)
-        return (outputs, denoised_outputs, ray_actors)
+            normalized_noise = _normalize_grouped_inputs(noise_list, num_gpus, "noise_list")
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda index, actor: actor.custom_sampler_advanced.remote(
+                    add_noise,
+                    normalized_noise[index],
+                    normalized_guider[index],
+                    sampler,
+                    sigmas,
+                    normalized_latent[index],
+                ),
+            )
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            outputs, denoised_outputs = _split_advanced_results(results)
+            return (outputs, denoised_outputs, ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class DPSamplerCustom:
@@ -802,42 +899,52 @@ class DPSamplerCustom:
         sampler = sampler[0]
         sigmas = sigmas[0]
 
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
         gpu_actors = ray_actors["workers"]
-        num_gpus = len(gpu_actors)
-        # Replicate last item to fill remaining slots, or truncate if too many
-        if len(latent_image) < num_gpus:
-            latent_image = latent_image + [latent_image[-1]] * (num_gpus - len(latent_image))
-        elif len(latent_image) > num_gpus:
-            latent_image = latent_image[:num_gpus]
-        if len(positive) == 1:
-            positive = positive * num_gpus
-        if len(negative) == 1:
-            negative = negative * num_gpus
-        if len(noise_list) < num_gpus:
-            noise_list = noise_list + [noise_list[-1]] * (num_gpus - len(noise_list))
-        elif len(noise_list) > num_gpus:
-            noise_list = noise_list[:num_gpus]
 
-        # Each GPU gets its own noise/conditioning/latent — decoupled from FSDP sharding
-        futures = [
-            actor.custom_sampler.remote(
-                add_noise,
-                noise_list[i],
-                cfg,
-                positive[i],
-                negative[i],
-                sampler,
-                sigmas,
-                latent_image[i],
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            num_gpus = len(gpu_actors)
+            normalized_latent = latent_image
+            if len(normalized_latent) < num_gpus:
+                normalized_latent = normalized_latent + [normalized_latent[-1]] * (
+                    num_gpus - len(normalized_latent)
+                )
+            elif len(normalized_latent) > num_gpus:
+                normalized_latent = normalized_latent[:num_gpus]
+            normalized_positive = positive * num_gpus if len(positive) == 1 else positive
+            normalized_negative = negative * num_gpus if len(negative) == 1 else negative
+            normalized_noise = noise_list
+            if len(normalized_noise) < num_gpus:
+                normalized_noise = normalized_noise + [normalized_noise[-1]] * (
+                    num_gpus - len(normalized_noise)
+                )
+            elif len(normalized_noise) > num_gpus:
+                normalized_noise = normalized_noise[:num_gpus]
+            out = submit_results(
+                ray,
+                gpu_actors,
+                lambda index, actor: actor.custom_sampler.remote(
+                    add_noise,
+                    normalized_noise[index],
+                    cfg,
+                    normalized_positive[index],
+                    normalized_negative[index],
+                    sampler,
+                    sigmas,
+                    normalized_latent[index],
+                ),
             )
-            for i, actor in enumerate(gpu_actors)
-        ]
-        out = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        return (out, ray_actors)
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            return (out, ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class RayAddNoise:

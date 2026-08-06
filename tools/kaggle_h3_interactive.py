@@ -578,6 +578,7 @@ def _make_raylight_workflow(stock_workflow):
         {"name": "sampler", "type": "SAMPLER", "link": 16},
         {"name": "sigmas", "type": "SIGMAS", "link": 18},
         {"name": "latent_image", "type": "LATENT", "link": 188},
+        {"name": "shutdown_after_sampling", "type": "BOOLEAN", "widget": {"name": "shutdown_after_sampling"}, "link": None},
     ]
     sampler["outputs"] = [
         {"name": "output", "type": "LATENT", "links": [225, 226]},
@@ -585,7 +586,7 @@ def _make_raylight_workflow(stock_workflow):
         {"name": "ray_actors", "type": "RAY_ACTORS", "links": None},
     ]
     sampler["properties"] = {"Node name for S&R": "XFuserSamplerCustomAdvanced"}
-    sampler["widgets_values"] = [True, 1, "randomize"]
+    sampler["widgets_values"] = [True, 1, "randomize", True]
     nodes.remove(random_noise)
 
     new_links = []
@@ -929,23 +930,262 @@ def print_memory_diagnostics(lines=12):
         print("MISSING")
 
 
+def _phase_timing_summary(comfy_log):
+    prefix = b"[raylight-load-phase] "
+    max_input_bytes = 64 * 1024 * 1024
+    max_line_bytes = 64 * 1024
+    max_events = 10_000
+    max_phases = 5_000
+    max_field_chars = 512
+    phases = []
+    event_count = 0
+    invalid_event_count = 0
+    oversized_line_count = 0
+    field_truncated_count = 0
+    input_bytes = 0
+    first_event_unix = None
+    last_event_unix = None
+    event_limit_reached = False
+    phase_limit_reached = False
+    input_truncated = False
+    summary_error_type = None
+
+    try:
+        if comfy_log.is_file():
+            with comfy_log.open("rb") as stream:
+                while input_bytes < max_input_bytes:
+                    remaining = max_input_bytes - input_bytes
+                    line = stream.readline(min(max_line_bytes + 1, remaining))
+                    if not line:
+                        break
+                    input_bytes += len(line)
+                    if len(line) > max_line_bytes or not line.endswith(b"\n"):
+                        oversized_line_count += 1
+                        while line and not line.endswith(b"\n") and input_bytes < max_input_bytes:
+                            remaining = max_input_bytes - input_bytes
+                            line = stream.readline(min(max_line_bytes + 1, remaining))
+                            input_bytes += len(line)
+                        continue
+                    if prefix not in line:
+                        continue
+                    if event_count >= max_events:
+                        event_limit_reached = True
+                        input_truncated = True
+                        break
+                    try:
+                        payload = json.loads(
+                            line.split(prefix, 1)[1].strip().decode("utf-8", errors="replace")
+                        )
+                    except (TypeError, ValueError, UnicodeError):
+                        invalid_event_count += 1
+                        continue
+                    if not isinstance(payload, dict):
+                        invalid_event_count += 1
+                        continue
+
+                    event_count += 1
+                    event_unix = payload.get("unix")
+                    if isinstance(event_unix, (int, float)):
+                        first_event_unix = (
+                            event_unix
+                            if first_event_unix is None
+                            else min(first_event_unix, event_unix)
+                        )
+                        last_event_unix = (
+                            event_unix
+                            if last_event_unix is None
+                            else max(last_event_unix, event_unix)
+                        )
+                    if "elapsed_seconds" not in payload:
+                        continue
+                    if len(phases) >= max_phases:
+                        phase_limit_reached = True
+                        continue
+
+                    phase = {}
+                    for key in (
+                        "event",
+                        "phase_id",
+                        "rank",
+                        "process_role",
+                        "status",
+                        "elapsed_seconds",
+                        "error_type",
+                        "unix",
+                    ):
+                        value = payload.get(key)
+                        if isinstance(value, str):
+                            if len(value) > max_field_chars:
+                                value = value[:max_field_chars]
+                                field_truncated_count += 1
+                            phase[key] = value
+                        elif value is None or isinstance(value, (bool, int, float)):
+                            if key in payload:
+                                phase[key] = value
+                    phases.append(phase)
+
+                if input_bytes >= max_input_bytes:
+                    input_truncated = True
+    except BaseException as exc:
+        summary_error_type = type(exc).__name__
+
+    return {
+        "schema_version": 1,
+        "source": comfy_log.name,
+        "event_count": event_count,
+        "invalid_event_count": invalid_event_count,
+        "oversized_line_count": oversized_line_count,
+        "field_truncated_count": field_truncated_count,
+        "input_bytes": input_bytes,
+        "input_byte_limit": max_input_bytes,
+        "event_limit_reached": event_limit_reached,
+        "phase_limit_reached": phase_limit_reached,
+        "input_truncated": input_truncated,
+        "summary_error_type": summary_error_type,
+        "first_event_unix": first_event_unix,
+        "last_event_unix": last_event_unix,
+        "phases": phases,
+    }
+
+
+def _write_run_manifest(venv_python, gpu_identities):
+    probe_source = """
+import json
+import platform
+import torch
+import ray
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    comfy_kitchen_version = version("comfy-kitchen")
+except PackageNotFoundError:
+    comfy_kitchen_version = None
+print("RAYLIGHT_RUNTIME_JSON=" + json.dumps({
+    "python": platform.python_version(),
+    "pytorch": torch.__version__,
+    "cuda": torch.version.cuda,
+    "ray": ray.__version__,
+    "comfy_kitchen": comfy_kitchen_version,
+    "cuda_available": torch.cuda.is_available(),
+    "visible_gpu_count": torch.cuda.device_count(),
+    "visible_gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
+}, sort_keys=True))
+"""
+    observed = subprocess.run(
+        [str(venv_python), "-c", probe_source],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    marker = "RAYLIGHT_RUNTIME_JSON="
+    runtime_line = next(
+        line for line in observed.stdout.splitlines() if line.startswith(marker)
+    )
+    runtime = json.loads(runtime_line[len(marker):])
+    if runtime.get("cuda_available") is not True or runtime.get("visible_gpu_count") != 2:
+        raise RuntimeError(f"Runtime observation did not confirm two CUDA GPUs: {runtime}")
+
+    manifest = {
+        "schema_version": 1,
+        "run_started_unix": time.time(),
+        "video_included": False,
+        "active_profile": str(globals()["ACTIVE_PROFILE"]),
+        "raylight_commit": str(globals()["RAYLIGHT_COMMIT"]),
+        "comfy_commit": str(globals()["COMFY_COMMIT"]),
+        "hardware_target": "2x Tesla T4",
+        "gpu_count": 2,
+        "gpu_identities": list(gpu_identities),
+        "runtime": runtime,
+        "geometry": {
+            "width": int(globals()["H3_WIDTH"]),
+            "height": int(globals()["H3_HEIGHT"]),
+            "length": int(globals()["H3_LENGTH"]),
+        },
+        "evaluations": 20,
+        "int8_accumulator_mib": int(globals()["INT8_ACCUMULATOR_MIB"]),
+        "distributed": {
+            "fsdp": True,
+            "ulysses_degree": 2,
+            "sequential_rank_materialization": True,
+            "shutdown_after_sampling": True,
+            "cooperative_shutdown_timeout_seconds": 30.0,
+            "force_shutdown_timeout_seconds": 10.0,
+        },
+        "telemetry_bounds": {
+            "input_mib": 64,
+            "line_kib": 64,
+            "events": 10_000,
+            "phases": 5_000,
+            "field_chars": 512,
+        },
+        "archive_policy": "diagnostics and timing only; generated media excluded",
+    }
+    manifest_path = Path(str(globals()["WORK_DIR"])) / "h3-run-manifest.json"
+    temporary_path = manifest_path.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    temporary_path.replace(manifest_path)
+    return manifest_path
+
+
 def export_memory_diagnostics():
     output = Path("/kaggle/working/h3-diagnostics.zip")
+    work_dir = Path(str(globals()["WORK_DIR"]))
+    comfy_log = work_dir / "comfy0.log"
+    manifest_path = work_dir / "h3-run-manifest.json"
+    phase_summary_path = work_dir / "raylight-phase-summary.json"
+    try:
+        phase_summary_path.unlink(missing_ok=True)
+    except BaseException:
+        pass
+    try:
+        phase_summary = _phase_timing_summary(comfy_log)
+        phase_summary_path.write_text(
+            json.dumps(phase_summary, indent=2, sort_keys=True) + "\n"
+        )
+    except BaseException:
+        pass
     candidates = [
+        manifest_path,
+        phase_summary_path,
         Path(APP_ROOT) / "bounded-diagnostic-result.json",
-        Path(WORK_DIR) / "memory_snapshots.jsonl",
-        Path(WORK_DIR) / "memory_events_last.txt",
-        Path(WORK_DIR) / "memory_monitor.log",
-        Path(WORK_DIR) / "comfy0.log",
-        Path(WORK_DIR) / "cloudflared.log",
+        work_dir / "memory_snapshots.jsonl",
+        work_dir / "memory_events_last.txt",
+        work_dir / "memory_monitor.log",
+        comfy_log,
+        work_dir / "cloudflared.log",
     ]
     output.unlink(missing_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         added = 0
+        archive_errors = []
         for item in candidates:
-            if item.is_file():
+            try:
+                if not item.is_file():
+                    continue
                 archive.write(item, arcname=item.name)
                 added += 1
+            except BaseException as exc:
+                if len(archive_errors) < 100:
+                    archive_errors.append({
+                        "candidate": str(getattr(item, "name", "unknown"))[:512],
+                        "error_type": type(exc).__name__[:512],
+                    })
+        if archive_errors:
+            try:
+                archive.writestr(
+                    "archive-errors.json",
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "errors": archive_errors,
+                            "truncated": len(archive_errors) >= 100,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ) + "\n",
+                )
+            except BaseException:
+                pass
     if not added:
         output.unlink(missing_ok=True)
         raise RuntimeError(
@@ -1014,6 +1254,9 @@ def main():
             'ACTION must be "start", "restart", "stop", "diagnostics", or "int8-probe"'
         )
 
+    if action in {"start", "restart"}:
+        (Path(str(globals()["WORK_DIR"])) / "h3-run-manifest.json").unlink(missing_ok=True)
+
     global SERVICE_PROCESSES
     SERVICE_PROCESSES = {}
     try:
@@ -1067,6 +1310,7 @@ def main():
         raylight_ready = _install_custom_nodes(venv_python)
         dependency_marker.write_text(str(time.time()))
         _install_workflows()
+        _write_run_manifest(venv_python, gpus)
 
         filebrowser = database = None
         if ENABLE_FILEBROWSER:

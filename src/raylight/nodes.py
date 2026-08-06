@@ -27,6 +27,12 @@ from .distributed_worker.ray_worker import (
 from .distributed_worker.ray_worker_vae import combine_dist_vae_partials, combine_seedvr2_vae_partials
 from .load_planning import load_workers_sequentially
 from .load_telemetry import emit_load_event, load_phase
+from .worker_cleanup import (
+    raise_for_shutdown_result,
+    run_lifecycle_or_shutdown,
+    shutdown_workers,
+    submit_results,
+)
 
 
 class AnyType(str):
@@ -1256,40 +1262,42 @@ class XFuserKSamplerAdvanced:
         return_with_leftover_noise,
         denoise=1.0,
     ):
-        # Clean VRAM for preparation to load model
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-        force_full_denoise = True
-        if return_with_leftover_noise == "enable":
-            force_full_denoise = False
-        disable_noise = False
-        if add_noise == "disable":
-            disable_noise = True
-
         gpu_actors = ray_actors["workers"]
-        futures = [
-            actor.common_ksampler.remote(
-                noise_seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive,
-                negative,
-                latent_image,
-                denoise=denoise,
-                disable_noise=disable_noise,
-                start_step=start_at_step,
-                last_step=end_at_step,
-                force_full_denoise=force_full_denoise,
-            )
-            for actor in gpu_actors
-        ]
 
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        return (results[0][0], ray_actors)
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            force_full_denoise = return_with_leftover_noise != "enable"
+            disable_noise = add_noise == "disable"
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda _index, actor: actor.common_ksampler.remote(
+                    noise_seed,
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    positive,
+                    negative,
+                    latent_image,
+                    denoise=denoise,
+                    disable_noise=disable_noise,
+                    start_step=start_at_step,
+                    last_step=end_at_step,
+                    force_full_denoise=force_full_denoise,
+                ),
+            )
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            return (results[0][0], ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class UnifiedParallelSampler:
@@ -1370,49 +1378,60 @@ class UnifiedParallelSampler:
         return_with_leftover_noise = return_with_leftover_noise[0]
         denoise = denoise[0]
 
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-        force_full_denoise = True
-        if return_with_leftover_noise == "enable":
-            force_full_denoise = False
-        disable_noise = False
-        if add_noise == "disable":
-            disable_noise = True
-
         gpu_actors = ray_actors["workers"]
-        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-        group_infos = ray.get([actor.get_exec_group_info.remote() for actor in gpu_actors])
-        _validate_unified_parallel_setup(parallel_dict, group_infos, "Unified Parallel Sampler")
-        dp_degree = int(group_infos[0]["dp_degree"])
-        noise_list = _normalize_grouped_inputs(noise_list, dp_degree, "noise_list")
-        positive = _normalize_grouped_inputs(positive, dp_degree, "positive")
-        negative = _normalize_grouped_inputs(negative, dp_degree, "negative")
-        latent_image = _normalize_grouped_inputs(latent_image, dp_degree, "latent_image")
-        futures = [
-            actor.common_ksampler.remote(
-                noise_list[group_info["dp_rank"]],
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive[group_info["dp_rank"]],
-                negative[group_info["dp_rank"]],
-                latent_image[group_info["dp_rank"]],
-                denoise=denoise,
-                disable_noise=disable_noise,
-                start_step=start_at_step,
-                last_step=end_at_step,
-                force_full_denoise=force_full_denoise,
-                grouped_output=True,
-            )
-            for actor, group_info in zip(gpu_actors, group_infos)
-        ]
 
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        results = _collect_grouped_results(results, dp_degree, "Unified Parallel Sampler")
-        return (results, ray_actors)
+        def sampling_lifecycle():
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            force_full_denoise = return_with_leftover_noise != "enable"
+            disable_noise = add_noise == "disable"
+            parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+            group_infos = ray.get([actor.get_exec_group_info.remote() for actor in gpu_actors])
+            _validate_unified_parallel_setup(
+                parallel_dict,
+                group_infos,
+                "Unified Parallel Sampler",
+            )
+            dp_degree = int(group_infos[0]["dp_degree"])
+            normalized_noise = _normalize_grouped_inputs(noise_list, dp_degree, "noise_list")
+            normalized_positive = _normalize_grouped_inputs(positive, dp_degree, "positive")
+            normalized_negative = _normalize_grouped_inputs(negative, dp_degree, "negative")
+            normalized_latent = _normalize_grouped_inputs(
+                latent_image,
+                dp_degree,
+                "latent_image",
+            )
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda index, actor: actor.common_ksampler.remote(
+                    normalized_noise[group_infos[index]["dp_rank"]],
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    normalized_positive[group_infos[index]["dp_rank"]],
+                    normalized_negative[group_infos[index]["dp_rank"]],
+                    normalized_latent[group_infos[index]["dp_rank"]],
+                    denoise=denoise,
+                    disable_noise=disable_noise,
+                    start_step=start_at_step,
+                    last_step=end_at_step,
+                    force_full_denoise=force_full_denoise,
+                    grouped_output=True,
+                ),
+            )
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            results = _collect_grouped_results(results, dp_degree, "Unified Parallel Sampler")
+            return (results, ray_actors)
+
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class DPKSamplerAdvanced:
@@ -1489,66 +1508,66 @@ class DPKSamplerAdvanced:
         denoise = denoise[0]
 
         gpu_actors = ray_actors["workers"]
-        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-        if parallel_dict["is_xdit"] is True:
-            raise ValueError(
+
+        def sampling_lifecycle():
+            parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+            if parallel_dict["is_xdit"] is True:
+                raise ValueError(
+                    """
+                Data Parallel KSampler only supports FSDP or standard Data Parallel (DP).
+                Please set both 'ulysses_degree' and 'ring_degree' to 0,
+                or use the XFuser KSampler instead. More info on Raylight mode https://github.com/komikndr/raylight
                 """
-            Data Parallel KSampler only supports FSDP or standard Data Parallel (DP).
-            Please set both 'ulysses_degree' and 'ring_degree' to 0,
-            or use the XFuser KSampler instead. More info on Raylight mode https://github.com/komikndr/raylight
-            """
+                )
+            num_gpus = len(gpu_actors)
+            normalized_latent = latent_image
+            if len(normalized_latent) < num_gpus:
+                normalized_latent = normalized_latent + [normalized_latent[-1]] * (
+                    num_gpus - len(normalized_latent)
+                )
+            elif len(normalized_latent) > num_gpus:
+                normalized_latent = normalized_latent[:num_gpus]
+            normalized_positive = positive * num_gpus if len(positive) == 1 else positive
+            normalized_negative = negative * num_gpus if len(negative) == 1 else negative
+            normalized_noise = (
+                noise_list[:num_gpus]
+                if len(noise_list) > num_gpus
+                else [noise_list[0]] * num_gpus
             )
-
-        num_gpus = len(gpu_actors)
-        # Replicate last latent to fill remaining slots, or truncate if too many
-        if len(latent_image) < num_gpus:
-            latent_image = latent_image + [latent_image[-1]] * (num_gpus - len(latent_image))
-        elif len(latent_image) > num_gpus:
-            latent_image = latent_image[:num_gpus]
-        if len(positive) == 1:
-            positive = positive * num_gpus
-        if len(negative) == 1:
-            negative = negative * num_gpus
-        if len(noise_list) > num_gpus:
-            noise_list = noise_list[:num_gpus]
-        else:
-            noise_list = [noise_list[0]] * num_gpus
-
-        # Clean VRAM for preparation to load model
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-        force_full_denoise = True
-        if return_with_leftover_noise == "enable":
-            force_full_denoise = False
-        disable_noise = False
-        if add_noise == "disable":
-            disable_noise = True
-
-        # Each GPU gets its own noise/conditioning — decoupled from FSDP sharding
-        futures = [
-            actor.common_ksampler.remote(
-                noise_list[i],
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive[i],
-                negative[i],
-                latent_image[i],
-                denoise=denoise,
-                disable_noise=disable_noise,
-                start_step=start_at_step,
-                last_step=end_at_step,
-                force_full_denoise=force_full_denoise,
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            force_full_denoise = return_with_leftover_noise != "enable"
+            disable_noise = add_noise == "disable"
+            results = submit_results(
+                ray,
+                gpu_actors,
+                lambda index, actor: actor.common_ksampler.remote(
+                    normalized_noise[index],
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    normalized_positive[index],
+                    normalized_negative[index],
+                    normalized_latent[index],
+                    denoise=denoise,
+                    disable_noise=disable_noise,
+                    start_step=start_at_step,
+                    last_step=end_at_step,
+                    force_full_denoise=force_full_denoise,
+                ),
             )
-            for i, actor in enumerate(gpu_actors)
-        ]
+            _clear_ray_worker_vram_after_sampling(ray_actors)
+            results = [result[0] for result in results]
+            return (results, ray_actors)
 
-        results = ray.get(futures)
-        _clear_ray_worker_vram_after_sampling(ray_actors)
-        results = [result[0] for result in results]
-        return (results, ray_actors)
+        return run_lifecycle_or_shutdown(
+            ray,
+            gpu_actors,
+            sampling_lifecycle,
+            timeout_seconds=30.0,
+        )
 
 
 class RayKill:
@@ -1574,16 +1593,30 @@ class RayKill:
     def kill_ray(self, ray_actors, kill_mode):
         gpu_actors = ray_actors["workers"]
         with load_phase("worker_shutdown", worker_count=len(gpu_actors), kill_mode=kill_mode):
-            futures = [actor.kill.remote() for actor in gpu_actors]
-            try:
-                ray.get(futures)
-            except ray.exceptions.RayActorError:
-                pass
+            result = shutdown_workers(
+                ray,
+                gpu_actors,
+                timeout_seconds=30.0,
+                retain_failure=True,
+            )
+            emit_load_event(
+                "worker_shutdown_result",
+                status=str(result["status"]),
+                worker_count=len(gpu_actors),
+                error_type=result.get("error_type"),
+                force_error_type=result.get("force_error_type"),
+                unconfirmed_worker_count=result.get("unconfirmed_worker_count"),
+            )
 
+            cluster_shutdown_error = None
             if kill_mode == "Kill Entire Cluster":
-                ray.shutdown()
+                try:
+                    ray.shutdown()
+                except BaseException as exc:
+                    cluster_shutdown_error = exc
                 _cleanup_ray_temp()
                 RayControlNetLoader._current_controlnet_path = None
+            raise_for_shutdown_result(result, secondary_error=cluster_shutdown_error)
 
         return ()
 

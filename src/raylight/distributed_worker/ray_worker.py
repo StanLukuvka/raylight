@@ -55,6 +55,7 @@ from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNois
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
 from raylight.memory_telemetry import process_memory_snapshot
 from raylight.load_telemetry import emit_load_event, load_phase
+from raylight.worker_cleanup import run_worker_shutdown
 from ray.exceptions import RayActorError
 
 
@@ -1198,17 +1199,29 @@ class RayWorker:
 
     def kill(self):
         emit_load_event("worker_shutdown_start", rank=self.local_rank)
-        with load_phase("worker_resource_release", rank=self.local_rank):
-            self._free_cached_aux_models()
-            self._invalidate_non_fsdp_cache()
-            self.model = None
-            gc.collect()
-            torch.cuda.empty_cache()
-        with load_phase("process_group_destroy", rank=self.local_rank):
-            if dist.is_initialized():
-                dist.destroy_process_group()
-        emit_load_event("worker_shutdown_complete", rank=self.local_rank)
-        ray.actor.exit_actor()
+
+        def release_resources():
+            with load_phase("worker_resource_release", rank=self.local_rank):
+                self._free_cached_aux_models()
+                self._invalidate_non_fsdp_cache()
+                self.model = None
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        def destroy_process_group():
+            with load_phase("process_group_destroy", rank=self.local_rank):
+                if dist.is_initialized():
+                    dist.destroy_process_group()
+
+        def exit_actor():
+            emit_load_event("worker_shutdown_complete", rank=self.local_rank)
+            ray.actor.exit_actor()
+
+        run_worker_shutdown(
+            release_resources=release_resources,
+            destroy_process_group=destroy_process_group,
+            exit_actor=exit_actor,
+        )
 
     def ray_vae_loader(self, vae_path):
         if self.vae_model is not None and getattr(self, "_cached_vae_path", None) == vae_path:
