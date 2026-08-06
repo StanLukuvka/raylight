@@ -14,6 +14,11 @@ from raylight.memory_trace import (
     h3_stop_after_first_forward,
     set_h3_phase_profile_active,
 )
+from raylight.spectrum_h3 import (
+    begin_spectrum_call,
+    observe_spectrum_feature,
+    predict_spectrum_feature,
+)
 from ..utils import pad_to_world_size
 
 
@@ -110,6 +115,86 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
             head_dim=self.head_dim,
         )
     return result
+
+
+def usp_run_blocks(
+    self,
+    h,
+    t_emb,
+    mod_segments,
+    rope_freqs,
+    transformer_options,
+    start=0,
+    end=None,
+):
+    """Run a synchronized rank-local H3 block range for community block caches."""
+    global _H3_FORWARD_COUNT
+    start = int(start)
+    end = len(self.blocks) if end is None else int(end)
+    if not 0 <= start <= end <= len(self.blocks):
+        raise ValueError(f"Invalid MiniMax H3 block range [{start}, {end})")
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        requested = torch.tensor([start, end], device=h.device, dtype=torch.int32)
+        lower = requested.clone()
+        upper = requested.clone()
+        sp_group = get_sp_group()
+        sp_group.all_reduce(lower, op=torch.distributed.ReduceOp.MIN)
+        sp_group.all_reduce(upper, op=torch.distributed.ReduceOp.MAX)
+        if not torch.equal(lower, upper):
+            raise RuntimeError(
+                "MiniMax H3 community cache selected different block ranges across Ulysses ranks: "
+                f"local=[{start}, {end}), min={lower.tolist()}, max={upper.tolist()}"
+            )
+
+    phase_profile_enabled = h3_phase_profile_enabled()
+    profile_this_forward = phase_profile_enabled and _H3_FORWARD_COUNT == 1
+    trace_this_forward = (
+        h3_memory_trace_enabled()
+        and not _H3_TRACE_FORWARD_DONE
+        and (not phase_profile_enabled or profile_this_forward)
+    )
+    patches_replace = transformer_options.get("patches_replace", {})
+    blocks_replace = patches_replace.get("dit", {})
+    prefetch_queue = comfy.model_prefetch.make_prefetch_queue(
+        list(self.blocks[start:end]), h.device, transformer_options
+    )
+    for i in range(start, end):
+        block = self.blocks[i]
+        if trace_this_forward:
+            torch.cuda.reset_peak_memory_stats()
+            h3_memory_snapshot("h3_block_start", block=i, local_rows=h.shape[0])
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, h.device, block)
+        if profile_this_forward and i == 0:
+            set_h3_phase_profile_active(True)
+        if ("double_block", i) in blocks_replace:
+            def block_wrap(args):
+                return {"img": block(
+                    args["img"],
+                    args["t_emb"],
+                    args["mod_segments"],
+                    args["rope_freqs"],
+                    transformer_options=args["transformer_options"],
+                )}
+            h = blocks_replace[("double_block", i)](
+                {
+                    "img": h,
+                    "t_emb": t_emb,
+                    "mod_segments": mod_segments,
+                    "rope_freqs": rope_freqs,
+                    "transformer_options": transformer_options,
+                },
+                {"original_block": block_wrap},
+            )["img"]
+        else:
+            h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+        if profile_this_forward and i == 0:
+            set_h3_phase_profile_active(False)
+        if trace_this_forward:
+            h3_memory_snapshot("h3_block_end", block=i, local_rows=h.shape[0])
+    if prefetch_queue is not None:
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, h.device, None)
+    return h
 
 
 def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
@@ -257,33 +342,76 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     if trace_this_forward:
         h3_memory_snapshot("h3_after_split_release", local_rows=h.shape[0])
 
-    # blocks
-    patches_replace = transformer_options.get("patches_replace", {})
-    blocks_replace = patches_replace.get("dit", {})
-    prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
-    for i, block in enumerate(self.blocks):
+    # blocks: either execute the synchronized native/cache loop or forecast its output.
+    spectrum_call = None
+    if transformer_options.get("spectrum_h3_runtime") is not None:
+        from comfyui_spectrum_h3.minimax_h3 import branch_labels
+
+        spectrum_call = begin_spectrum_call(
+            transformer_options,
+            (1, *h.shape),
+            (
+                "raylight-ulysses-local-hidden-v1",
+                tuple(layout.signature),
+                int(h_orig_size),
+                int(h.shape[0]),
+                int(get_sequence_parallel_rank()),
+                int(get_sequence_parallel_world_size()),
+            ),
+            branch_labels(transformer_options),
+        )
+
+    if spectrum_call is not None and not spectrum_call.actual:
+        h = predict_spectrum_feature(
+            spectrum_call,
+            device=h.device,
+            dtype=h.dtype,
+        )[0]
         if trace_this_forward:
-            torch.cuda.reset_peak_memory_stats()
-            h3_memory_snapshot("h3_block_start", block=i, local_rows=h.shape[0])
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block)
-        if profile_this_forward and i == 0:
-            set_h3_phase_profile_active(True)
-        if ("double_block", i) in blocks_replace:
-            def block_wrap(args):
-                return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
-                                     transformer_options=args["transformer_options"])}
-            h = blocks_replace[("double_block", i)](
-                {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
-                 "transformer_options": transformer_options},
-                {"original_block": block_wrap})["img"]
+            h3_memory_snapshot("h3_spectrum_forecast", local_rows=h.shape[0])
+    else:
+        patches_replace = transformer_options.get("patches_replace", {})
+        blocks_replace = patches_replace.get("dit", {})
+        local_start = int(get_sequence_parallel_rank()) * int(h.shape[0])
+        local_end = local_start + int(h.shape[0])
+        cache_ranges = []
+        for segment_start, segment_end, kind in layout.segments:
+            if kind not in ("audio", "video"):
+                continue
+            overlap_start = max(int(segment_start), local_start)
+            overlap_end = min(int(segment_end), local_end)
+            if overlap_start < overlap_end:
+                cache_ranges.append((overlap_start - local_start, overlap_end - local_start))
+
+        if ("block_loop", 0) in blocks_replace:
+            def block_loop_wrap(args):
+                return {"img": self._run_blocks(
+                    args["img"],
+                    args["t_emb"],
+                    args["mod_segments"],
+                    args["rope_freqs"],
+                    args["transformer_options"],
+                    args.get("start", 0),
+                    args.get("end"),
+                )}
+            h = blocks_replace[("block_loop", 0)](
+                {
+                    "img": h,
+                    "t_emb": t_emb,
+                    "mod_segments": mod_segments,
+                    "rope_freqs": rope_freqs,
+                    "transformer_options": transformer_options,
+                    "cache_ranges": cache_ranges,
+                    "block_count": len(self.blocks),
+                },
+                {"original_block": block_loop_wrap},
+            )["img"]
         else:
-            h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
-        if profile_this_forward and i == 0:
-            set_h3_phase_profile_active(False)
-        if trace_this_forward:
-            h3_memory_snapshot("h3_block_end", block=i, local_rows=h.shape[0])
-    if prefetch_queue is not None:
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
+            h = self._run_blocks(h, t_emb, mod_segments, rope_freqs, transformer_options)
+        if spectrum_call is not None:
+            observe_spectrum_feature(spectrum_call, h.unsqueeze(0))
+            if trace_this_forward:
+                h3_memory_snapshot("h3_spectrum_actual_archived", local_rows=h.shape[0])
 
     # ===================== SP GATHER ===================== #
     if trace_this_forward:

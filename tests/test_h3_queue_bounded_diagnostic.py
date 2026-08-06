@@ -1,3 +1,4 @@
+import importlib.util
 from pathlib import Path
 
 
@@ -21,10 +22,28 @@ def test_bounded_queue_uses_exact_accepted_distributed_graph_and_two_unload_barr
         '"ray_dashboard_address": "None"',
         '"torch_dist_address": "127.0.0.1:29500"',
         '"class_type": "RayUNETLoader"',
+        '"class_type": "RaySpectrumApplyMiniMaxH3"',
+        '"ray_actors": ["spectrum", 0]',
+        '"history_storage": "system_ram"',
         '"class_type": "XFuserSamplerCustomAdvanced"',
     ):
         assert value in source
     assert source.count('"load_after": ["conditioning", 0]') == 2
+
+
+def test_bounded_queue_can_run_native_control_without_spectrum():
+    spec = importlib.util.spec_from_file_location("h3_bounded_queue", RUNNER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    accelerated = module.prompt_graph(736, 416, 124, spectrum_enabled=True)
+    native = module.prompt_graph(736, 416, 124, spectrum_enabled=False)
+    assert "spectrum" in accelerated
+    assert native["scheduler"]["inputs"]["ray_actors"] == ["unet", 0]
+    assert native["guider"]["inputs"]["ray_actors"] == ["unet", 0]
+    assert "spectrum" not in native
+    assert '"--no-spectrum"' in RUNNER.read_text()
 
 
 def test_bounded_queue_is_shape_configurable_and_accepts_only_the_intentional_stop():

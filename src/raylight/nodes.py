@@ -122,6 +122,22 @@ def _ensure_runtime_workdir(module_dir: Path) -> Path:
     return runtime_dir
 
 
+def _community_accelerator_modules() -> list[str]:
+    modules = []
+    for label, env_name in (
+        ("Spectrum H3", "RAYLIGHT_SPECTRUM_H3_PACKAGE"),
+        ("TE-Speed H3", "RAYLIGHT_TE_SPEED_H3_PACKAGE"),
+    ):
+        package = os.environ.get(env_name)
+        if not package:
+            continue
+        package_path = Path(package).resolve()
+        if not package_path.is_dir():
+            raise RuntimeError(f"{label} package path does not exist: {package_path}")
+        modules.append(str(package_path))
+    return modules
+
+
 def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir: Path):
     python_path_entries = [str(repo_root)]
     existing = os.environ.get("PYTHONPATH")
@@ -129,13 +145,15 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         python_path_entries.extend(part for part in existing.split(os.pathsep) if part)
     python_path = os.pathsep.join(dict.fromkeys(python_path_entries))
 
+    py_modules = [str(module_dir), *_community_accelerator_modules()]
+
     env_vars = {
         "PYTHONPATH": python_path,
         "COMFYUI_BASE_DIRECTORY": str(repo_root),
     }
 
     return {
-        "py_modules": [str(module_dir)],
+        "py_modules": py_modules,
         "working_dir": str(runtime_workdir),
         "env_vars": env_vars,
     }
@@ -224,7 +242,7 @@ def _build_remote_runtime_env(module_dir: Path, repo_root: Path):
     ]
 
     return {
-        "py_modules": [str(module_dir)],
+        "py_modules": [str(module_dir), *_community_accelerator_modules()],
         "working_dir": str(repo_root),
         "env_vars": {
             "COMFYUI_BASE_DIRECTORY": ".",

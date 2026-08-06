@@ -41,9 +41,13 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
         "REQUIRED_MODELS",
         "RAYLIGHT_WORKFLOW_PATH",
         "OFFICIAL_T2V_WORKFLOW_URL",
+        "SPECTRUM_H3_COMMIT",
+        "TE_SPEED_H3_COMMIT",
     }
     assert required <= namespace.keys()
     assert namespace["ACTION"] == "status"
+    assert namespace["SPECTRUM_H3_COMMIT"] == "85ec1da66277e893079ecd46e32cc865c56cfe53"
+    assert namespace["TE_SPEED_H3_COMMIT"] == "c1dacf47bc02cb9326f7b93c69280529b93d391b"
     assert namespace["H3_WIDTH"] == 608
     assert namespace["H3_HEIGHT"] == 352
     assert namespace["H3_LENGTH"] == 124
@@ -70,6 +74,23 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
     assert namespace["REQUIRED_MODELS"][0]["name"] == (
         "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     )
+
+
+def test_notebook_entry_removes_disabled_community_packages_from_worker_environment(monkeypatch):
+    monkeypatch.setenv("RAYLIGHT_SPECTRUM_H3_PACKAGE", "/stale/spectrum")
+    monkeypatch.setenv("RAYLIGHT_TE_SPEED_H3_PACKAGE", "/stale/te-speed")
+    namespace = {
+        "RAYLIGHT_COMMIT": "1" * 40,
+        "ACTION": "status",
+        "USE_FAKE_MODEL_STUBS": True,
+        "INSTALL_SPECTRUM_H3": False,
+        "INSTALL_TE_SPEED_H3": False,
+    }
+    with patch("urllib.request.urlopen", side_effect=RuntimeError("entry reached provisioner fetch")):
+        with pytest.raises(RuntimeError, match="entry reached provisioner fetch"):
+            exec(compile(ENTRY_PATH.read_text(), str(ENTRY_PATH), "exec"), namespace)  # noqa: S102
+    assert "RAYLIGHT_SPECTRUM_H3_PACKAGE" not in os.environ
+    assert "RAYLIGHT_TE_SPEED_H3_PACKAGE" not in os.environ
 
 
 def test_notebook_entry_exports_diagnostic_memory_controls():

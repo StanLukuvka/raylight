@@ -295,6 +295,28 @@ def _install_custom_nodes(venv_python):
             "[default]\n" f"security_level = {MANAGER_SECURITY_LEVEL}\n"
         )
 
+    if globals().get("INSTALL_SPECTRUM_H3", False):
+        spectrum_dir = Path(globals()["SPECTRUM_H3_DIR"])
+        spectrum_commit = str(globals()["SPECTRUM_H3_COMMIT"])
+        _checkout_pinned_repo(
+            globals()["SPECTRUM_H3_REPO_URL"],
+            spectrum_dir,
+            spectrum_commit,
+            clean_paths=(".",),
+        )
+        print(f"[✓] Spectrum H3 community plugin pinned at {spectrum_commit}")
+
+    if globals().get("INSTALL_TE_SPEED_H3", False):
+        te_speed_dir = Path(globals()["TE_SPEED_H3_DIR"])
+        te_speed_commit = str(globals()["TE_SPEED_H3_COMMIT"])
+        _checkout_pinned_repo(
+            globals()["TE_SPEED_H3_REPO_URL"],
+            te_speed_dir,
+            te_speed_commit,
+            clean_paths=(".",),
+        )
+        print(f"[✓] TE-Speed H3 community plugin pinned at {te_speed_commit}")
+
     if not INSTALL_RAYLIGHT:
         return False
 
@@ -479,6 +501,9 @@ def _make_raylight_workflow(stock_workflow):
     init_link_id = next_link_id
     load_after_link_id = next_link_id + 1
     init_after_link_id = next_link_id + 2
+    spectrum_link_id = next_link_id + 3
+    spectrum_node_id = next_node_id + 1
+    spectrum_enabled = bool(globals().get("INSTALL_SPECTRUM_H3", False))
     conditioning_input = next(
         item for item in guider.get("inputs", []) if item.get("name") == "conditioning"
     )
@@ -546,13 +571,37 @@ def _make_raylight_workflow(stock_workflow):
         },
     ]
     loader["outputs"] = [{
-        "name": "ray_actors", "type": "RAY_ACTORS", "links": [5, 193],
+        "name": "ray_actors",
+        "type": "RAY_ACTORS",
+        "links": [spectrum_link_id] if spectrum_enabled else [5, 193],
     }]
     loader["properties"] = {"Node name for S&R": "RayUNETLoader"}
     # Preserve checkpoint selector and explicit dtype=default so INT8 ConvRot metadata wins.
     loader["widgets_values"] = [loader.get("widgets_values", [
         "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ])[0], "default"]
+
+    spectrum = {
+        "id": spectrum_node_id,
+        "type": "RaySpectrumApplyMiniMaxH3",
+        "pos": [-1540, 4380],
+        "size": [430, 430],
+        "flags": {},
+        "order": 2,
+        "mode": 0,
+        "inputs": [{
+            "name": "ray_actors", "type": "RAY_ACTORS", "link": spectrum_link_id,
+        }],
+        "outputs": [{
+            "name": "ray_actors", "type": "RAY_ACTORS", "links": [5, 193],
+        }],
+        "properties": {"Node name for S&R": "RaySpectrumApplyMiniMaxH3"},
+        # Community plugin's conservative preset. System RAM is mandatory for
+        # the dual-T4 profile because the measured worst-rank VRAM margin is small.
+        "widgets_values": [True, 0.50, 4, 0.10, 2.0, 0.75, 5, 1, 8, False, "system_ram"],
+    }
+    if spectrum_enabled:
+        nodes.append(spectrum)
 
     scheduler["type"] = "RayBasicScheduler"
     scheduler["inputs"] = [{"name": "ray_actors", "type": "RAY_ACTORS", "link": 5}]
@@ -595,6 +644,9 @@ def _make_raylight_workflow(stock_workflow):
         if link_id == 40:
             continue
         if link_id in (5, 193):
+            if spectrum_enabled:
+                link["origin_id"] = spectrum_node_id
+                link["origin_slot"] = 0
             link["type"] = "RAY_ACTORS"
         elif link_id == 207:
             link["target_id"] = sampler["id"]
@@ -609,6 +661,13 @@ def _make_raylight_workflow(stock_workflow):
         elif link_id == 188:
             link["target_slot"] = 5
         new_links.append(link)
+    if spectrum_enabled:
+        new_links.append({
+            "id": spectrum_link_id,
+            "origin_id": loader["id"], "origin_slot": 0,
+            "target_id": spectrum_node_id, "target_slot": 0,
+            "type": "RAY_ACTORS",
+        })
     new_links.append({
         "id": init_link_id,
         "origin_id": initializer["id"], "origin_slot": 0,
@@ -640,16 +699,24 @@ def _make_raylight_workflow(stock_workflow):
     source_links = source_node["outputs"][conditioning_source["origin_slot"]].setdefault("links", [])
     source_links.extend([load_after_link_id, init_after_link_id])
     h3["links"] = new_links
-    h3["state"]["lastNodeId"] = max(h3["state"].get("lastNodeId", 0), next_node_id)
-    h3["state"]["lastLinkId"] = max(h3["state"].get("lastLinkId", 0), init_after_link_id)
+    max_node_id = spectrum_node_id if spectrum_enabled else next_node_id
+    max_link_id = spectrum_link_id if spectrum_enabled else init_after_link_id
+    h3["state"]["lastNodeId"] = max(h3["state"].get("lastNodeId", 0), max_node_id)
+    h3["state"]["lastLinkId"] = max(h3["state"].get("lastLinkId", 0), max_link_id)
 
     data.setdefault("extra", {})["raylight"] = {
         "commit": RAYLIGHT_COMMIT,
-        "mode": "FSDP+USP",
+        "mode": "FSDP+USP+Spectrum" if spectrum_enabled else "FSDP+USP",
         "gpus": 2,
         "ulysses_degree": 2,
         "fsdp_cpu_offload": False,
         "attention": "TORCH_EFFICIENT",
+        "spectrum": {
+            "enabled": spectrum_enabled,
+            "plugin_commit": str(globals().get("SPECTRUM_H3_COMMIT", "")),
+            "preset": "community-conservative",
+            "history_storage": "system_ram",
+        },
         "fake_model_mode": bool(globals().get("USE_FAKE_MODEL_STUBS", False)),
         "profile": {"width": h3_width, "height": h3_height, "length": h3_length},
         "int8_accumulator_mib": int(globals().get("INT8_ACCUMULATOR_MIB", 128)),

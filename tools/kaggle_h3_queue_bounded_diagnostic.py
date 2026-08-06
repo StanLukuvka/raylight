@@ -39,9 +39,9 @@ def request_json(path: str, payload: dict | None = None, timeout: float = 30) ->
         return json.loads(response.read())
 
 
-def prompt_graph(width: int, height: int, length: int) -> dict:
+def prompt_graph(width: int, height: int, length: int, spectrum_enabled: bool = True) -> dict:
     prompt = "A red paper kite glides steadily through a clear blue sky. Gentle wind sound, no speech, no music."
-    return {
+    graph = {
         "init": {
             "class_type": "RayInitializer",
             "inputs": {
@@ -101,10 +101,27 @@ def prompt_graph(width: int, height: int, length: int) -> dict:
                 "load_after": ["conditioning", 0],
             },
         },
+        "spectrum": {
+            "class_type": "RaySpectrumApplyMiniMaxH3",
+            "inputs": {
+                "ray_actors": ["unet", 0],
+                "enabled": True,
+                "blend_weight": 0.50,
+                "degree": 4,
+                "ridge_lambda": 0.10,
+                "window_size": 2.0,
+                "flex_window": 0.75,
+                "warmup_steps": 5,
+                "tail_actual_steps": 1,
+                "max_history": 8,
+                "debug": True,
+                "history_storage": "system_ram",
+            },
+        },
         "scheduler": {
             "class_type": "RayBasicScheduler",
             "inputs": {
-                "ray_actors": ["unet", 0],
+                "ray_actors": ["spectrum", 0],
                 "scheduler": "simple",
                 "steps": 20,
                 "denoise": 1.0,
@@ -113,7 +130,7 @@ def prompt_graph(width: int, height: int, length: int) -> dict:
         "guider": {
             "class_type": "RayBasicGuider",
             "inputs": {
-                "ray_actors": ["unet", 0],
+                "ray_actors": ["spectrum", 0],
                 "conditioning": ["conditioning", 0],
             },
         },
@@ -158,14 +175,22 @@ def prompt_graph(width: int, height: int, length: int) -> dict:
             },
         },
     }
+    if not spectrum_enabled:
+        graph.pop("spectrum")
+        graph["scheduler"]["inputs"]["ray_actors"] = ["unet", 0]
+        graph["guider"]["inputs"]["ray_actors"] = ["unet", 0]
+    return graph
 
 
-def wait_for_server(timeout: float = 900) -> None:
+def wait_for_server(timeout: float = 900, spectrum_enabled: bool = True) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             info = request_json("/object_info", timeout=10)
-            required = {node["class_type"] for node in prompt_graph(736, 416, 124).values()}
+            required = {
+                node["class_type"]
+                for node in prompt_graph(736, 416, 124, spectrum_enabled).values()
+            }
             missing = sorted(required.difference(info))
             if missing:
                 raise RuntimeError(f"ComfyUI is missing required node classes: {missing}")
@@ -175,12 +200,15 @@ def wait_for_server(timeout: float = 900) -> None:
     raise TimeoutError("Timed out waiting for ComfyUI")
 
 
-def run(width: int, height: int, length: int) -> dict:
+def run(width: int, height: int, length: int, spectrum_enabled: bool = True) -> dict:
     RESULT.unlink(missing_ok=True)
-    wait_for_server()
+    wait_for_server(spectrum_enabled=spectrum_enabled)
     queued = request_json(
         "/prompt",
-        {"prompt": prompt_graph(width, height, length), "client_id": "raylight-h3-bounded-diagnostic"},
+        {
+            "prompt": prompt_graph(width, height, length, spectrum_enabled),
+            "client_id": "raylight-h3-bounded-diagnostic",
+        },
     )
     prompt_id = queued["prompt_id"]
     deadline = time.monotonic() + 60 * 20
@@ -229,9 +257,15 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=736)
     parser.add_argument("--height", type=int, default=416)
     parser.add_argument("--length", type=int, default=124)
+    parser.add_argument("--no-spectrum", action="store_true")
     args = parser.parse_args()
     try:
-        result = run(args.width, args.height, args.length)
+        result = run(
+            args.width,
+            args.height,
+            args.length,
+            spectrum_enabled=not args.no_spectrum,
+        )
     except Exception as exc:
         result = {
             "status": "failed",
