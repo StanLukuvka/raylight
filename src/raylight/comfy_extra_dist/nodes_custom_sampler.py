@@ -11,6 +11,7 @@ import comfy.utils
 from .ray_patch_decorator import ray_patch_with_return
 
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise
+from raylight.load_telemetry import emit_load_event, load_phase
 
 
 def _make_ray_guider(ray_actors, guider_type, **kwargs):
@@ -80,12 +81,14 @@ def _clear_ray_worker_vram_after_sampling(ray_actors):
         return
     parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
     if not parallel_dict.get("clear_vram_after_sampling", False):
+        emit_load_event("worker_vram_release_skipped", worker_count=len(gpu_actors))
         return
 
-    ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
-    gc.collect()
-    comfy.model_management.unload_all_models()
-    comfy.model_management.soft_empty_cache()
+    with load_phase("worker_vram_release", worker_count=len(gpu_actors)):
+        ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
+        gc.collect()
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
 
 
 def _normalized_degree(value):
@@ -440,23 +443,32 @@ class XFuserSamplerCustomAdvanced:
     CATEGORY = "Raylight/extra/custom_sampling/samplers"
 
     def ray_sample(self, add_noise, noise_seed, guider, sampler, sigmas, latent_image):
-        gc.collect()
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
         ray_actors = _extract_ray_actors_from_guider(guider)
         gpu_actors = ray_actors["workers"]
-        futures = [
-            actor.custom_sampler_advanced.remote(
-                add_noise,
-                noise_seed,
-                guider,
-                sampler,
-                sigmas,
-                latent_image,
-            )
-            for actor in gpu_actors
-        ]
-        results = ray.get(futures)
+        sigma_count = int(sigmas.numel()) if hasattr(sigmas, "numel") else len(sigmas)
+        with load_phase("sampling_prepare", worker_count=len(gpu_actors), sigma_count=sigma_count):
+            gc.collect()
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+        with load_phase(
+            "sampling_dispatch",
+            worker_count=len(gpu_actors),
+            sigma_count=sigma_count,
+            add_noise=bool(add_noise),
+        ):
+            futures = [
+                actor.custom_sampler_advanced.remote(
+                    add_noise,
+                    noise_seed,
+                    guider,
+                    sampler,
+                    sigmas,
+                    latent_image,
+                )
+                for actor in gpu_actors
+            ]
+            results = ray.get(futures)
+        emit_load_event("sampling_complete", worker_count=len(gpu_actors), sigma_count=sigma_count)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         output, denoised_output = results[0]
         return (output, denoised_output, ray_actors)

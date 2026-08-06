@@ -54,7 +54,7 @@ from raylight.distributed_worker.ray_worker_vae import (
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
 from raylight.memory_telemetry import process_memory_snapshot
-from raylight.load_telemetry import load_phase
+from raylight.load_telemetry import emit_load_event, load_phase
 from ray.exceptions import RayActorError
 
 
@@ -562,6 +562,10 @@ class RayWorker:
         gc.collect()
 
     def clear_sampling_vram(self):
+        with load_phase("sampling_vram_release", rank=self.local_rank):
+            return self._clear_sampling_vram()
+
+    def _clear_sampling_vram(self):
         """Release worker-side CUDA memory after a Ray sampling node finishes.
 
         Keep the ModelPatcher object alive so cached ComfyUI workflows can run
@@ -630,6 +634,15 @@ class RayWorker:
             snapshot["cuda_reserved_bytes"] = None
         return snapshot
 
+    def _telemetry_memory_snapshot(self):
+        try:
+            return self.get_memory_snapshot()
+        except Exception as exc:
+            return {
+                "rank": self.local_rank,
+                "snapshot_error_type": type(exc).__name__,
+            }
+
     def _log_memory_snapshot(self, stage):
         snapshot = self.get_memory_snapshot()
         gib = 1024**3
@@ -655,6 +668,11 @@ class RayWorker:
 
     def _patch_fsdp_for_sampling(self):
         self._log_memory_snapshot("before FSDP shard materialization")
+        emit_load_event(
+            "fsdp_materialization_plan",
+            rank=self.local_rank,
+            worker_snapshot=self._telemetry_memory_snapshot(),
+        )
         try:
             model = self.model
             if model is None:
@@ -667,6 +685,11 @@ class RayWorker:
             raise
         finally:
             self._log_memory_snapshot("after FSDP shard materialization")
+            emit_load_event(
+                "fsdp_materialization_snapshot",
+                rank=self.local_rank,
+                worker_snapshot=self._telemetry_memory_snapshot(),
+            )
 
     def _normalize_model_options(self, model_options):
         if not model_options:
@@ -899,6 +922,20 @@ class RayWorker:
         )
 
     def load_unet(self, unet_path, model_options):
+        try:
+            checkpoint_size_bytes = os.path.getsize(unet_path)
+        except OSError:
+            checkpoint_size_bytes = None
+        emit_load_event(
+            "worker_load_request",
+            rank=self.local_rank,
+            checkpoint_name=os.path.basename(unet_path),
+            checkpoint_size_bytes=checkpoint_size_bytes,
+            fsdp=bool(self.parallel_dict["is_fsdp"]),
+            is_quant=bool(self.parallel_dict.get("is_quant", False)),
+            use_mmap=bool(self.parallel_dict.get("use_mmap", True)),
+            lora_count=len(self.lora_list or ()),
+        )
         if self.parallel_dict["is_fsdp"] is True:
             self._log_memory_snapshot("before quantized FSDP checkpoint mapping")
             active_key = self._active_model_key(unet_path, model_options)
@@ -908,6 +945,11 @@ class RayWorker:
                 base_model = getattr(self.model, "model", self.model)
                 self.overwrite_cast_dtype = getattr(base_model, "manual_cast_dtype", None)
                 self.is_model_loaded = True
+                emit_load_event(
+                    "worker_model_reused",
+                    rank=self.local_rank,
+                    checkpoint_name=os.path.basename(unet_path),
+                )
                 return
 
             # Model or LoRA changed — free old VRAM deterministically, then reload
@@ -941,7 +983,13 @@ class RayWorker:
             gc.collect()
             model_management.soft_empty_cache()
 
-            with load_phase("checkpoint_mapping", rank=self.local_rank):
+            with load_phase(
+                "checkpoint_mapping",
+                rank=self.local_rank,
+                checkpoint_name=os.path.basename(unet_path),
+                checkpoint_size_bytes=checkpoint_size_bytes,
+                use_mmap=bool(fsdp_model_options["use_mmap"]),
+            ):
                 self.model, self.state_dict = fsdp_load_diffusion_model(
                     unet_path,
                     self.local_rank,
@@ -949,19 +997,33 @@ class RayWorker:
                     self.is_cpu_offload,
                     model_options=fsdp_model_options,
                 )
-            torch.cuda.synchronize()
-            model_management.soft_empty_cache()
-            gc.collect()
+            emit_load_event(
+                "checkpoint_mapped",
+                rank=self.local_rank,
+                checkpoint_name=os.path.basename(unet_path),
+                state_dict_entries=len(self.state_dict or {}),
+                worker_snapshot=self._telemetry_memory_snapshot(),
+            )
+            with load_phase("checkpoint_reclaim", rank=self.local_rank):
+                torch.cuda.synchronize()
+                model_management.soft_empty_cache()
+                gc.collect()
 
             if self.lora_list is not None:
-                self.load_lora()
+                with load_phase("lora_materialization", rank=self.local_rank, lora_count=len(self.lora_list)):
+                    self.load_lora()
 
             # Quantized workers own distinct checkpoint mappings. Materialize
             # and release this worker's full mapping before the orchestrator
             # starts the next worker, keeping aggregate host RSS bounded. The
             # non-quantized path still shares worker 0's meta model with peers.
             if self.parallel_dict.get("is_quant", False):
-                self.set_state_dict()
+                with load_phase(
+                    "state_dict_handoff",
+                    rank=self.local_rank,
+                    state_dict_entries=len(self.state_dict or {}),
+                ):
+                    self.set_state_dict()
                 self._patch_fsdp_for_sampling()
 
             base_model = getattr(self.model, "model", self.model)
@@ -969,6 +1031,12 @@ class RayWorker:
             self.is_model_loaded = True
             self.active_request_key = active_key
             self._log_memory_snapshot("after quantized FSDP checkpoint mapping")
+            emit_load_event(
+                "worker_model_ready",
+                rank=self.local_rank,
+                checkpoint_name=os.path.basename(unet_path),
+                worker_snapshot=self._telemetry_memory_snapshot(),
+            )
             return
         else:
             import comfy.sd as comfy_sd
@@ -1129,10 +1197,17 @@ class RayWorker:
             del lora_model
 
     def kill(self):
-        self._free_cached_aux_models()
-        self._invalidate_non_fsdp_cache()
-        self.model = None
-        dist.destroy_process_group()
+        emit_load_event("worker_shutdown_start", rank=self.local_rank)
+        with load_phase("worker_resource_release", rank=self.local_rank):
+            self._free_cached_aux_models()
+            self._invalidate_non_fsdp_cache()
+            self.model = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        with load_phase("process_group_destroy", rank=self.local_rank):
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        emit_load_event("worker_shutdown_complete", rank=self.local_rank)
         ray.actor.exit_actor()
 
     def ray_vae_loader(self, vae_path):
@@ -1146,7 +1221,12 @@ class RayWorker:
             self._cached_vae_path = None
             torch.cuda.empty_cache()
 
-        vae_model = load_vae_model(vae_path)
+        with load_phase(
+            "vae_load",
+            rank=self.local_rank,
+            vae_name=os.path.basename(vae_path),
+        ):
+            vae_model = load_vae_model(vae_path)
 
         if self.local_rank == 0:
             print(f"VAE loaded in {self.global_world_size} GPUs")
@@ -1155,10 +1235,28 @@ class RayWorker:
 
     @patch_ray_tqdm
     def ray_vae_decode_partial(self, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, job_rank=0, job_world_size=1):
-        return ray_vae_decode_partial_impl(self, samples, tile_size, overlap, temporal_size, temporal_overlap, job_rank, job_world_size)
+        with load_phase(
+            "vae_decode_partial",
+            rank=self.local_rank,
+            job_rank=job_rank,
+            job_world_size=job_world_size,
+            tile_size=tile_size,
+            temporal_size=temporal_size,
+        ):
+            return ray_vae_decode_partial_impl(
+                self,
+                samples,
+                tile_size,
+                overlap,
+                temporal_size,
+                temporal_overlap,
+                job_rank,
+                job_world_size,
+            )
 
     def ray_vae_decode_finalize(self, decoded):
-        return ray_vae_decode_finalize_impl(self, decoded)
+        with load_phase("vae_decode_finalize", rank=self.local_rank):
+            return ray_vae_decode_finalize_impl(self, decoded)
 
     @patch_ray_tqdm
     def ray_seedvr2_vae_decode_partial(self, samples, tile_size, overlap=64, job_rank=0, job_world_size=1):

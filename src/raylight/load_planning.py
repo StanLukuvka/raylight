@@ -1,6 +1,7 @@
 """Small orchestration helpers for bounded-memory model loading."""
 
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
 from typing import TypeVar
 
 
@@ -13,6 +14,7 @@ def load_workers_sequentially(
     *,
     start: Callable[[Worker], Pending],
     wait: Callable[[Pending], object],
+    phase: Callable[[int], AbstractContextManager[object]] | None = None,
 ) -> None:
     """Start and finish one worker load before starting the next.
 
@@ -23,5 +25,7 @@ def load_workers_sequentially(
     shard materialization, and full-state release before it returns. This
     helper intentionally trades setup latency for a bounded aggregate peak.
     """
-    for worker in workers:
-        wait(start(worker))
+    for worker_index, worker in enumerate(workers):
+        phase_context = phase(worker_index) if phase is not None else nullcontext()
+        with phase_context:
+            wait(start(worker))

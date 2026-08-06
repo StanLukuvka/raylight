@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -37,6 +38,37 @@ def test_workers_finish_loading_one_at_a_time():
         ("finish", "future-rank0"),
         ("start", "rank1"),
         ("finish", "future-rank1"),
+    ]
+
+
+def test_sequential_loader_wraps_each_worker_in_an_indexed_phase():
+    module = _load_module()
+    events = []
+
+    @contextmanager
+    def phase(worker_index):
+        events.append(("phase-start", worker_index))
+        try:
+            yield
+        finally:
+            events.append(("phase-end", worker_index))
+
+    module.load_workers_sequentially(
+        ["rank0", "rank1"],
+        start=lambda worker: events.append(("start", worker)) or f"future-{worker}",
+        wait=lambda future: events.append(("finish", future)),
+        phase=phase,
+    )
+
+    assert events == [
+        ("phase-start", 0),
+        ("start", "rank0"),
+        ("finish", "future-rank0"),
+        ("phase-end", 0),
+        ("phase-start", 1),
+        ("start", "rank1"),
+        ("finish", "future-rank1"),
+        ("phase-end", 1),
     ]
 
 

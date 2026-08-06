@@ -43,12 +43,14 @@ def _clear_ray_worker_vram_after_sampling(ray_actors):
         return
     parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
     if not parallel_dict.get("clear_vram_after_sampling", False):
+        emit_load_event("worker_vram_release_skipped", worker_count=len(gpu_actors))
         return
 
-    ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
-    gc.collect()
-    comfy.model_management.unload_all_models()
-    comfy.model_management.soft_empty_cache()
+    with load_phase("worker_vram_release", worker_count=len(gpu_actors)):
+        ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
+        gc.collect()
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
 
 
 def _raylight_ray_tmpdir() -> Path:
@@ -621,6 +623,22 @@ class RayInitializer:
         if ray_cluster_address in _LOCAL_CLUSTER_ADDRESSES:
             _configure_raylight_ray_tmpdir(runtime_env_base)
 
+        emit_load_event(
+            "initializer_plan",
+            world_size=world_size,
+            selected_gpus=selected_gpus,
+            object_store_bytes=ray_object_store_gb,
+            fsdp=bool(FSDP),
+            fsdp_cpu_offload=bool(FSDP_CPU_OFFLOAD),
+            ulysses_degree=self.parallel_dict["ulysses_degree"],
+            ring_degree=self.parallel_dict["ring_degree"],
+            cfg_degree=self.parallel_dict["cfg_degree"],
+            dp_degree=self.parallel_dict["dp_degree"],
+            attention=XFuser_attention,
+            skip_comm_test=bool(skip_comm_test),
+            use_mmap=bool(use_mmap),
+        )
+
         if load_after is not None:
             # Ray startup transiently allocates its object store and worker
             # runtime. Release conditioning first; waiting until RayUNETLoader
@@ -635,15 +653,21 @@ class RayInitializer:
 
         try:
             # Shut down so if comfy user try another workflow it will not cause error
-            ray.shutdown()
-            _cleanup_ray_temp()
-            RayControlNetLoader._current_controlnet_path = None
+            with load_phase("ray_pre_init_cleanup"):
+                ray.shutdown()
+                _cleanup_ray_temp()
+                RayControlNetLoader._current_controlnet_path = None
             original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
             restricted_cuda_visible_devices = runtime_env_base.get("env_vars", {}).get("CUDA_VISIBLE_DEVICES")
             if restricted_cuda_visible_devices is not None:
                 os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
             try:
-                with load_phase("ray_init"):
+                with load_phase(
+                    "ray_init",
+                    world_size=world_size,
+                    object_store_bytes=ray_object_store_gb,
+                    local_cluster=ray_cluster_address in _LOCAL_CLUSTER_ADDRESSES,
+                ):
                     ray.init(
                         ray_cluster_address,
                         namespace=ray_cluster_namespace,
@@ -676,14 +700,15 @@ class RayInitializer:
 
         if not skip_comm_test:
             print("Running NCCL communication test...")
-            with load_phase("nccl_probe"):
+            with load_phase("nccl_probe", world_size=world_size):
                 ray_nccl_tester(world_size)
         else:
             print("Skipping NCCL test (skip_comm_test=True)")
-            emit_load_event("nccl_probe_skipped")
-        with load_phase("actor_spawn"):
+            emit_load_event("nccl_probe_skipped", world_size=world_size)
+        with load_phase("actor_spawn", world_size=world_size):
             ray_actor_fn = make_ray_actor_fn(world_size, self.parallel_dict)
             ray_actors = ray_actor_fn()
+        emit_load_event("actors_ready", world_size=world_size)
         return ([ray_actors, ray_actor_fn],)
 
 
@@ -955,20 +980,45 @@ class RayUNETLoader:
             unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         except:
             unet_path = folder_paths.get_full_path_or_raise("checkpoints", unet_name)
+        try:
+            checkpoint_size_bytes = Path(unet_path).stat().st_size
+        except OSError:
+            checkpoint_size_bytes = None
+        emit_load_event(
+            "model_load_plan",
+            checkpoint_name=Path(unet_path).name,
+            checkpoint_size_bytes=checkpoint_size_bytes,
+            worker_count=len(gpu_actors),
+            weight_dtype=weight_dtype,
+            fsdp=bool(parallel_dict["is_fsdp"]),
+            use_mmap=bool(parallel_dict.get("use_mmap", True)),
+            lora_count=len(lora or ()),
+        )
 
         loaded_futures = []
         patched_futures = []
 
-        for actor in gpu_actors:
-            loaded_futures.append(actor.set_lora_list.remote(lora))
-        ray.get(loaded_futures)
-        loaded_futures = []
+        with load_phase("worker_configuration", worker_count=len(gpu_actors)):
+            for actor in gpu_actors:
+                loaded_futures.append(actor.set_lora_list.remote(lora))
+            ray.get(loaded_futures)
+            loaded_futures = []
 
-        parallel_dict["is_quant"] = _quant_metadata_checker(unet_path)
-        for actor in gpu_actors:
-            loaded_futures.append(actor.set_parallel_dict.remote(parallel_dict))
-        ray.get(loaded_futures)
-        loaded_futures = []
+            with load_phase(
+                "checkpoint_classification",
+                checkpoint_name=Path(unet_path).name,
+                checkpoint_size_bytes=checkpoint_size_bytes,
+            ):
+                parallel_dict["is_quant"] = _quant_metadata_checker(unet_path)
+            for actor in gpu_actors:
+                loaded_futures.append(actor.set_parallel_dict.remote(parallel_dict))
+            ray.get(loaded_futures)
+            loaded_futures = []
+        emit_load_event(
+            "checkpoint_classified",
+            checkpoint_name=Path(unet_path).name,
+            is_quant=bool(parallel_dict["is_quant"]),
+        )
 
         if parallel_dict["is_fsdp"] is True:
             num_replicas = parallel_dict.get("dp_degree", 1)
@@ -1001,11 +1051,21 @@ class RayUNETLoader:
                         loaded_futures.append(actor.set_state_dict.remote())
 
                 else:
-                    load_workers_sequentially(
-                        gpu_actors,
-                        start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
-                        wait=ray.get,
-                    )
+                    with load_phase(
+                        "worker_model_load",
+                        worker_count=len(gpu_actors),
+                        loading_mode="fsdp_quantized_sequential",
+                    ):
+                        load_workers_sequentially(
+                            gpu_actors,
+                            start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
+                            wait=ray.get,
+                            phase=lambda worker_index: load_phase(
+                                "worker_load_rpc",
+                                worker_index=worker_index,
+                                checkpoint_name=Path(unet_path).name,
+                            ),
+                        )
 
             else:
                 # Multiple replicas — load model per group
@@ -1029,11 +1089,23 @@ class RayUNETLoader:
                             loaded_futures.append(actor.set_state_dict.remote())
 
                     else:
-                        load_workers_sequentially(
-                            group_actors,
-                            start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
-                            wait=ray.get,
-                        )
+                        with load_phase(
+                            "worker_model_load",
+                            worker_count=len(group_actors),
+                            loading_mode="fsdp_quantized_sequential_group",
+                            group_id=group_id,
+                        ):
+                            load_workers_sequentially(
+                                group_actors,
+                                start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
+                                wait=ray.get,
+                                phase=lambda worker_index: load_phase(
+                                    "worker_load_rpc",
+                                    worker_index=worker_index,
+                                    group_id=group_id,
+                                    checkpoint_name=Path(unet_path).name,
+                                ),
+                            )
 
             ray.get(loaded_futures)
             loaded_futures = []
@@ -1043,16 +1115,26 @@ class RayUNETLoader:
             ray.get(loaded_futures)
             loaded_futures = []
 
-        for actor in gpu_actors:
-            if parallel_dict["is_xdit"] and not parallel_dict.get("pipefusion_enabled"):
-                if (parallel_dict["ulysses_degree"]) > 1 or (parallel_dict["ring_degree"] > 1):
-                    patched_futures.append(actor.patch_usp.remote())
-                if parallel_dict["cfg_degree"] > 1:
-                    patched_futures.append(actor.patch_cfg.remote())
-            if parallel_dict.get("pipefusion_enabled"):
-                patched_futures.append(actor.patch_pipefusion.remote())
+        with load_phase("worker_runtime_patch", worker_count=len(gpu_actors)):
+            for actor in gpu_actors:
+                if parallel_dict["is_xdit"] and not parallel_dict.get("pipefusion_enabled"):
+                    if (parallel_dict["ulysses_degree"]) > 1 or (parallel_dict["ring_degree"] > 1):
+                        patched_futures.append(actor.patch_usp.remote())
+                    if parallel_dict["cfg_degree"] > 1:
+                        patched_futures.append(actor.patch_cfg.remote())
+                if parallel_dict.get("pipefusion_enabled"):
+                    patched_futures.append(actor.patch_pipefusion.remote())
 
-        ray.get(patched_futures)
+            ray.get(patched_futures)
+
+        emit_load_event(
+            "model_ready",
+            checkpoint_name=Path(unet_path).name,
+            checkpoint_size_bytes=checkpoint_size_bytes,
+            worker_count=len(gpu_actors),
+            is_quant=bool(parallel_dict["is_quant"]),
+            fsdp=bool(parallel_dict["is_fsdp"]),
+        )
 
         return (ray_actors,)
 
@@ -1491,16 +1573,17 @@ class RayKill:
 
     def kill_ray(self, ray_actors, kill_mode):
         gpu_actors = ray_actors["workers"]
-        futures = [actor.kill.remote() for actor in gpu_actors]
-        try:
-            ray.get(futures)
-        except ray.exceptions.RayActorError:
-            pass
+        with load_phase("worker_shutdown", worker_count=len(gpu_actors), kill_mode=kill_mode):
+            futures = [actor.kill.remote() for actor in gpu_actors]
+            try:
+                ray.get(futures)
+            except ray.exceptions.RayActorError:
+                pass
 
-        if kill_mode == "Kill Entire Cluster":
-            ray.shutdown()
-            _cleanup_ray_temp()
-            RayControlNetLoader._current_controlnet_path = None
+            if kill_mode == "Kill Entire Cluster":
+                ray.shutdown()
+                _cleanup_ray_temp()
+                RayControlNetLoader._current_controlnet_path = None
 
         return ()
 
