@@ -50,6 +50,26 @@ def test_workflow_releases_conditioning_before_ray_initializer() -> None:
     assert '"target_id": loader["id"]' in source
 
 
+def test_production_workflow_skips_redundant_nccl_probe() -> None:
+    tree = ast.parse(_source())
+    workflow = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_make_raylight_workflow"
+    )
+    initializer = next(
+        node for node in workflow.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "initializer" for target in node.targets)
+    )
+    assert isinstance(initializer.value, ast.Dict)
+    widgets = next(
+        value for key, value in zip(initializer.value.keys, initializer.value.values, strict=True)
+        if isinstance(key, ast.Constant) and key.value == "widgets_values"
+    )
+    assert isinstance(widgets, ast.List)
+    assert ast.literal_eval(widgets.elts[12]) is True
+
+
 def test_downloaded_native_binaries_are_checksum_verified() -> None:
     source = _source()
     assert '_require_sha256(archive, FILEBROWSER_ARCHIVE_SHA256' in source

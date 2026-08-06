@@ -525,7 +525,7 @@ def _make_raylight_workflow(stock_workflow):
         # mmap, Ray object store GiB, dashboard, torch distributed address.
         "widgets_values": [
             "local", "minimax-h3-raylight", 2, 2, 1, 1, 1, False,
-            True, True, False, "TORCH_EFFICIENT", False, True,
+            True, True, False, "TORCH_EFFICIENT", True, True,
             0.5, "None", "127.0.0.1:29500",
         ],
     }

@@ -26,6 +26,7 @@ from .distributed_worker.ray_worker import (
 )
 from .distributed_worker.ray_worker_vae import combine_dist_vae_partials, combine_seedvr2_vae_partials
 from .load_planning import load_workers_sequentially
+from .load_telemetry import emit_load_event, load_phase
 
 
 class AnyType(str):
@@ -624,12 +625,13 @@ class RayInitializer:
             # Ray startup transiently allocates its object store and worker
             # runtime. Release conditioning first; waiting until RayUNETLoader
             # is too late because the local Ray cluster already exists then.
-            load_after = None
-            comfy.model_management.unload_all_models()
-            comfy.model_management.soft_empty_cache()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            with load_phase("initializer_conditioning_release"):
+                load_after = None
+                comfy.model_management.unload_all_models()
+                comfy.model_management.soft_empty_cache()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         try:
             # Shut down so if comfy user try another workflow it will not cause error
@@ -641,15 +643,16 @@ class RayInitializer:
             if restricted_cuda_visible_devices is not None:
                 os.environ["CUDA_VISIBLE_DEVICES"] = restricted_cuda_visible_devices
             try:
-                ray.init(
-                    ray_cluster_address,
-                    namespace=ray_cluster_namespace,
-                    runtime_env=deepcopy(runtime_env_base),
-                    object_store_memory=ray_object_store_gb,
-                    include_dashboard=enable_dashboard,
-                    dashboard_host=dashboard_host,
-                    dashboard_port=dashboard_port,
-                )
+                with load_phase("ray_init"):
+                    ray.init(
+                        ray_cluster_address,
+                        namespace=ray_cluster_namespace,
+                        runtime_env=deepcopy(runtime_env_base),
+                        object_store_memory=ray_object_store_gb,
+                        include_dashboard=enable_dashboard,
+                        dashboard_host=dashboard_host,
+                        dashboard_port=dashboard_port,
+                    )
             finally:
                 if restricted_cuda_visible_devices is not None:
                     if original_cuda_visible_devices is not None:
@@ -673,11 +676,14 @@ class RayInitializer:
 
         if not skip_comm_test:
             print("Running NCCL communication test...")
-            ray_nccl_tester(world_size)
+            with load_phase("nccl_probe"):
+                ray_nccl_tester(world_size)
         else:
             print("Skipping NCCL test (skip_comm_test=True)")
-        ray_actor_fn = make_ray_actor_fn(world_size, self.parallel_dict)
-        ray_actors = ray_actor_fn()
+            emit_load_event("nccl_probe_skipped")
+        with load_phase("actor_spawn"):
+            ray_actor_fn = make_ray_actor_fn(world_size, self.parallel_dict)
+            ray_actors = ray_actor_fn()
         return ([ray_actors, ray_actor_fn],)
 
 
@@ -919,16 +925,17 @@ class RayUNETLoader:
                 "stock workflows can overlap Qwen with denoiser loading and OOM."
             )
         if load_after is not None:
-            del load_after
-            # Conditioning may leave a large quantized text encoder resident
-            # in a non-PyTorch CUDA allocation even after its output is ready.
-            # Explicitly unload Comfy's managed models before Ray workers begin
-            # materializing denoiser shards.
-            comfy.model_management.unload_all_models()
-            comfy.model_management.soft_empty_cache()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            with load_phase("loader_conditioning_release"):
+                del load_after
+                # Conditioning may leave a large quantized text encoder resident
+                # in a non-PyTorch CUDA allocation even after its output is ready.
+                # Explicitly unload Comfy's managed models before Ray workers begin
+                # materializing denoiser shards.
+                comfy.model_management.unload_all_models()
+                comfy.model_management.soft_empty_cache()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         ray_actors, gpu_actors, parallel_dict = ensure_fresh_actors(ray_actors_init)
 
         model_options = {}

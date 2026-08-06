@@ -136,7 +136,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "dac9846c8d059a0ab74bffb8ff0483b0c1001b43228b6a75d925b8f9637b23c5"
+provisioner_sha256 = "e31434e1d8f09764f992e9f6c912addb2f131047ab9664251d1f12360dde95b1"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:

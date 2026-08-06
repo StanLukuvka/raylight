@@ -54,6 +54,7 @@ from raylight.distributed_worker.ray_worker_vae import (
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
 from raylight.memory_telemetry import process_memory_snapshot
+from raylight.load_telemetry import load_phase
 from ray.exceptions import RayActorError
 
 
@@ -655,7 +656,11 @@ class RayWorker:
     def _patch_fsdp_for_sampling(self):
         self._log_memory_snapshot("before FSDP shard materialization")
         try:
-            self.model.patch_fsdp()
+            model = self.model
+            if model is None:
+                raise RuntimeError("FSDP shard materialization requires a loaded model")
+            with load_phase("fsdp_materialization", rank=self.local_rank):
+                model.patch_fsdp()
         except Exception:
             self.active_request_key = None
             self.is_model_loaded = False
@@ -936,13 +941,14 @@ class RayWorker:
             gc.collect()
             model_management.soft_empty_cache()
 
-            self.model, self.state_dict = fsdp_load_diffusion_model(
-                unet_path,
-                self.local_rank,
-                self.device_mesh,
-                self.is_cpu_offload,
-                model_options=fsdp_model_options,
-            )
+            with load_phase("checkpoint_mapping", rank=self.local_rank):
+                self.model, self.state_dict = fsdp_load_diffusion_model(
+                    unet_path,
+                    self.local_rank,
+                    self.device_mesh,
+                    self.is_cpu_offload,
+                    model_options=fsdp_model_options,
+                )
             torch.cuda.synchronize()
             model_management.soft_empty_cache()
             gc.collect()
