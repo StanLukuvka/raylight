@@ -101,6 +101,8 @@ def test_notebook_entry_exports_diagnostic_memory_controls():
         '"1" if H3_PHASE_PROFILE else "0"'
     ) in source
     assert 'os.environ["RAYLIGHT_INT8_BACKEND"] = H3_INT8_BACKEND' in source
+    assert 'H3_INT8_BACKEND not in {"eager", "cuda", "bob_triton"}' in source
+    assert '"triton==3.2.0"' in source
     assert (
         'os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13"] = '
         '"1" if H3_INT8_CUDA_ALLOW_UNDER_13 else "0"'

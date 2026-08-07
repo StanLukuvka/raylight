@@ -23,8 +23,48 @@ def test_int8_backend_policy_defaults_to_eager_and_rejects_unknown_values(monkey
     assert policy.requested_int8_backend() == "eager"
 
     monkeypatch.setenv("RAYLIGHT_INT8_BACKEND", "triton")
-    with pytest.raises(ValueError, match="RAYLIGHT_INT8_BACKEND must be eager or cuda"):
+    with pytest.raises(ValueError, match="RAYLIGHT_INT8_BACKEND must be eager, cuda, or bob_triton"):
         policy.requested_int8_backend()
+
+
+def test_bob_triton_backend_accepts_sm75_and_requires_triton_3_2(monkeypatch):
+    policy = _load_policy()
+    monkeypatch.setenv("RAYLIGHT_INT8_BACKEND", "bob_triton")
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def get_device_capability():
+            return (7, 5)
+
+    class FakeTorch:
+        cuda = FakeCuda()
+        version = type("Version", (), {"cuda": "12.8"})()
+
+    class FakeKitchen:
+        @staticmethod
+        def list_backends():
+            return {"eager": {"available": True, "disabled": False}}
+
+    class FakeTriton:
+        __version__ = "3.2.0"
+
+    imported = []
+
+    def import_module(name):
+        imported.append(name)
+        return FakeTriton() if name == "triton" else FakeKitchen()
+
+    backend, kitchen = policy.initialize_worker_int8_backend(
+        FakeTorch(), import_kitchen=import_module
+    )
+
+    assert backend == "bob_triton"
+    assert isinstance(kitchen, FakeKitchen)
+    assert imported == ["triton", "comfy_kitchen"]
 
 
 def test_cuda_under_13_guard_runs_before_comfy_kitchen_import(monkeypatch):
@@ -124,6 +164,15 @@ def test_cuda_int8_is_timed_and_eager_fallback_fails_closed():
     assert "return _profiled_cuda_int8_linear(" in source
     assert "cuda_backend.int8_linear = _profiled_cuda_int8_linear" not in source
     assert 'backend="cuda"' in source
+
+
+def test_bob_triton_is_a_single_worker_local_backend_branch():
+    source = (
+        ROOT / "src/raylight/comfy_dist/kitchen_patches/int8.py"
+    ).read_text()
+    assert 'if backend == "bob_triton":' in source
+    assert "return bob_triton_int8_linear(" in source
+    assert "from .int8_bob_triton import bob_triton_int8_linear" in source
 
 
 def test_cuda_worker_bootstrap_requires_bounded_profile_before_import(monkeypatch):

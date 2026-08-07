@@ -45,8 +45,10 @@ if not isinstance(H3_INT8_CUDA_ALLOW_UNDER_13, bool):
     raise TypeError("H3_INT8_CUDA_ALLOW_UNDER_13 must be bool")
 if not isinstance(H3_INT8_CUDA_ALLOW_UNBOUNDED, bool):
     raise TypeError("H3_INT8_CUDA_ALLOW_UNBOUNDED must be bool")
-if H3_INT8_BACKEND not in {"eager", "cuda"}:
-    raise RuntimeError(f"H3_INT8_BACKEND must be eager or cuda, got {H3_INT8_BACKEND!r}")
+if H3_INT8_BACKEND not in {"eager", "cuda", "bob_triton"}:
+    raise RuntimeError(
+        f"H3_INT8_BACKEND must be eager, cuda, or bob_triton, got {H3_INT8_BACKEND!r}"
+    )
 if H3_AUTO_QUEUE_DIAGNOSTIC and not H3_STOP_AFTER_FIRST_FORWARD:
     raise RuntimeError("Auto-queued diagnostics require H3_STOP_AFTER_FIRST_FORWARD=True")
 if (
@@ -99,13 +101,16 @@ else:
     os.environ.pop("RAYLIGHT_SPECTRUM_H3_PACKAGE", None)
 _default("USE_SYSTEM_SITE_PACKAGES", True)
 _default("DEPENDENCY_PROFILE", "compatible-v5-kernels-0.14.0")
-_default("EXTRA_PIP_PACKAGES", [
+extra_pip_packages = [
     "transformers==5.0.0",
     "diffusers==0.37.1",
     "kernels==0.14.0",
     "xfuser==0.4.5",
     "yunchang==0.6.4",
-])
+]
+if H3_INT8_BACKEND == "bob_triton":
+    extra_pip_packages.append("triton==3.2.0")
+_default("EXTRA_PIP_PACKAGES", extra_pip_packages)
 _default("COMFY_INSTANCES", [{"name": "comfy0", "gpu": None, "port": 8188}])
 _default("COMFY_EXTRA_ARGS", ["--listen", "0.0.0.0", "--cache-none", "--preview-method", "none"])
 _default("STARTUP_TIMEOUT_SECONDS", 900)

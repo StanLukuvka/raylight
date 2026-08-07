@@ -419,7 +419,8 @@ class RayWorker:
                     "compute_capability": self.compute_capability,
                     "comfy_kitchen": importlib.metadata.version("comfy-kitchen"),
                     "backend_status": _WORKER_COMFY_KITCHEN.list_backends().get(
-                        _WORKER_INT8_BACKEND, {}
+                        "eager" if _WORKER_INT8_BACKEND == "bob_triton" else _WORKER_INT8_BACKEND,
+                        {},
                     ),
                 },
                 sort_keys=True,

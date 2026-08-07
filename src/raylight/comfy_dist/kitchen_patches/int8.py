@@ -66,7 +66,8 @@ def _bounded_eager_int8_linear(
     """
     global _INT8_PHASE_CALLS, _INT8_TRACE_CALLS
 
-    if os.environ.get("RAYLIGHT_INT8_BACKEND", "eager").strip().lower() == "cuda":
+    backend = os.environ.get("RAYLIGHT_INT8_BACKEND", "eager").strip().lower()
+    if backend == "cuda":
         return _profiled_cuda_int8_linear(
             x=x,
             weight=weight,
@@ -76,6 +77,27 @@ def _bounded_eager_int8_linear(
             convrot=convrot,
             convrot_groupsize=convrot_groupsize,
             input_act=input_act,
+        )
+    if backend == "bob_triton":
+        from comfy_kitchen.backends.eager import quantization as eager_quantization
+        from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
+
+        from .int8_bob_triton import bob_triton_int8_linear
+
+        x = eager_quantization._apply_input_act(x, input_act)
+        if convrot:
+            if x.shape[-1] % convrot_groupsize != 0:
+                raise ValueError(
+                    f"ConvRot group size {convrot_groupsize} does not divide input features {x.shape[-1]}"
+                )
+            hadamard = _build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
+            x = _rotate_activation(x, hadamard, convrot_groupsize)
+        return bob_triton_int8_linear(
+            x=x,
+            weight=weight.to(device=x.device),
+            weight_scale=weight_scale,
+            bias=bias,
+            out_dtype=out_dtype,
         )
 
     from comfy_kitchen.backends.eager import quantization as eager_quantization

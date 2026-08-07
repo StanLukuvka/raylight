@@ -9,9 +9,9 @@ from typing import Any, Callable
 
 def requested_int8_backend() -> str:
     backend = os.environ.get("RAYLIGHT_INT8_BACKEND", "eager").strip().lower()
-    if backend not in {"eager", "cuda"}:
+    if backend not in {"eager", "cuda", "bob_triton"}:
         raise ValueError(
-            f"RAYLIGHT_INT8_BACKEND must be eager or cuda, got {backend!r}"
+            f"RAYLIGHT_INT8_BACKEND must be eager, cuda, or bob_triton, got {backend!r}"
         )
     return backend
 
@@ -33,6 +33,20 @@ def initialize_worker_int8_backend(
 ) -> tuple[str, Any]:
     """Validate policy before the eager Comfy Kitchen extension import."""
     backend = requested_int8_backend()
+    if backend == "bob_triton":
+        if not torch_module.cuda.is_available():
+            raise RuntimeError("bob_triton INT8 backend requires an available CUDA device")
+        capability = tuple(torch_module.cuda.get_device_capability())
+        if capability != (7, 5):
+            raise RuntimeError(
+                f"bob_triton research backend requires Tesla T4 / SM75, got SM{capability[0]}{capability[1]}"
+            )
+        triton = import_kitchen("triton")
+        triton_version = str(getattr(triton, "__version__", "unknown"))
+        if not triton_version.startswith("3.2."):
+            raise RuntimeError(
+                f"bob_triton research backend requires Triton 3.2.x for SM75, got {triton_version!r}"
+            )
     if backend == "cuda":
         if not torch_module.cuda.is_available():
             raise RuntimeError("CUDA INT8 backend requires an available CUDA device")
@@ -68,7 +82,10 @@ def initialize_worker_int8_backend(
             )
 
     kitchen = import_kitchen("comfy_kitchen")
-    status = kitchen.list_backends().get(backend, {})
-    if not status.get("available") or (backend == "eager" and status.get("disabled")):
-        raise RuntimeError(f"Requested Comfy Kitchen backend {backend!r} is unavailable: {status}")
+    kitchen_backend = "eager" if backend == "bob_triton" else backend
+    status = kitchen.list_backends().get(kitchen_backend, {})
+    if not status.get("available") or (kitchen_backend == "eager" and status.get("disabled")):
+        raise RuntimeError(
+            f"Requested Comfy Kitchen backend {kitchen_backend!r} for {backend!r} is unavailable: {status}"
+        )
     return backend, kitchen
