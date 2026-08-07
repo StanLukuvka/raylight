@@ -200,29 +200,43 @@ def _bounded_eager_int8_linear(
     return output.reshape(*orig_shape[:-1], weight.shape[0])
 
 
-def _release_cuda_cache_for_large_output(
+def _call_cuda_int8_with_oom_retry(
     x: torch.Tensor,
     weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
     out_dtype: torch.dtype,
-) -> None:
-    """Defragment AIMDO's pool before an H3-sized CUDA INT8 output allocation."""
-    output_rows = x.numel() // x.shape[-1]
-    output_bytes = output_rows * weight.shape[0] * torch.tensor([], dtype=out_dtype).element_size()
-    if output_bytes < 256 * 1024 * 1024:
-        return
-    free_before, _ = torch.cuda.mem_get_info(x.device)
-    required = output_bytes + 64 * 1024 * 1024
-    if free_before >= required:
-        return
-    torch.cuda.empty_cache()
-    free_after, _ = torch.cuda.mem_get_info(x.device)
-    print(
-        "[raylight-int8-cache-release] "
-        f"rank={os.environ.get('RAYLIGHT_RANK', '-1')} "
-        f"output_mib={output_bytes / (1024 * 1024):.1f} "
-        f"free_before_mib={free_before / (1024 * 1024):.1f} "
-        f"free_after_mib={free_after / (1024 * 1024):.1f}"
-    )
+    convrot: bool,
+    convrot_groupsize: int,
+    input_act: str | None,
+) -> torch.Tensor:
+    """Retry one fragmented large-output allocation after releasing CUDA cache."""
+    kwargs = {
+        "x": x,
+        "weight": weight,
+        "weight_scale": weight_scale,
+        "bias": bias,
+        "out_dtype": out_dtype,
+        "convrot": convrot,
+        "convrot_groupsize": convrot_groupsize,
+        "input_act": input_act,
+    }
+    try:
+        return cast(Any, _ORIG_CUDA_INT8_LINEAR)(**kwargs)
+    except torch.OutOfMemoryError:
+        free_before, _ = torch.cuda.mem_get_info(x.device)
+        torch.cuda.empty_cache()
+        free_after, _ = torch.cuda.mem_get_info(x.device)
+        output_rows = x.numel() // x.shape[-1]
+        output_bytes = output_rows * weight.shape[0] * torch.tensor([], dtype=out_dtype).element_size()
+        print(
+            "[raylight-int8-oom-retry] "
+            f"rank={os.environ.get('RAYLIGHT_RANK', '-1')} "
+            f"output_mib={output_bytes / (1024 * 1024):.1f} "
+            f"free_before_mib={free_before / (1024 * 1024):.1f} "
+            f"free_after_mib={free_after / (1024 * 1024):.1f}"
+        )
+        return cast(Any, _ORIG_CUDA_INT8_LINEAR)(**kwargs)
 
 
 def _profiled_cuda_int8_linear(
@@ -251,8 +265,7 @@ def _profiled_cuda_int8_linear(
         phase_start = torch.cuda.Event(enable_timing=True)
         phase_start.record()
 
-    _release_cuda_cache_for_large_output(x, weight, out_dtype)
-    result = cast(Any, _ORIG_CUDA_INT8_LINEAR)(
+    result = _call_cuda_int8_with_oom_retry(
         x=x,
         weight=weight,
         weight_scale=weight_scale,

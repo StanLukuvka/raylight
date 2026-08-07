@@ -1,7 +1,10 @@
 import importlib.util
 from pathlib import Path
+import sys
+import types
 
 import pytest
+import torch
 
 
 ROOT = Path(__file__).parents[1]
@@ -164,8 +167,9 @@ def test_cuda_int8_is_timed_and_eager_fallback_fails_closed():
     assert "return _profiled_cuda_int8_linear(" in source
     assert "cuda_backend.int8_linear = _profiled_cuda_int8_linear" not in source
     assert 'backend="cuda"' in source
-    assert "def _release_cuda_cache_for_large_output(" in source
-    assert "_release_cuda_cache_for_large_output(x, weight, out_dtype)" in source
+    assert "def _call_cuda_int8_with_oom_retry(" in source
+    assert "result = _call_cuda_int8_with_oom_retry(" in source
+    assert "except torch.OutOfMemoryError:" in source
 
 
 def test_bob_triton_is_a_single_worker_local_backend_branch():
@@ -175,6 +179,55 @@ def test_bob_triton_is_a_single_worker_local_backend_branch():
     assert 'if backend == "bob_triton":' in source
     assert "return bob_triton_int8_linear(" in source
     assert "from .int8_bob_triton import bob_triton_int8_linear" in source
+
+
+def test_cuda_int8_oom_retry_releases_cache_once(monkeypatch):
+    memory_trace = types.ModuleType("raylight.memory_trace")
+    for name in (
+        "h3_cuda_phase_report",
+        "h3_memory_snapshot",
+    ):
+        setattr(memory_trace, name, lambda *args, **kwargs: None)
+    for name in (
+        "h3_memory_trace_enabled",
+        "h3_phase_profile_active",
+        "h3_phase_profile_enabled",
+    ):
+        setattr(memory_trace, name, lambda: False)
+    monkeypatch.setitem(sys.modules, "raylight.memory_trace", memory_trace)
+    path = ROOT / "src/raylight/comfy_dist/kitchen_patches/int8.py"
+    spec = importlib.util.spec_from_file_location("raylight_test_int8_patch", path)
+    assert spec is not None and spec.loader is not None
+    int8 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(int8)
+
+    calls = []
+
+    def backend(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise torch.OutOfMemoryError("fragmented")
+        return torch.ones((1, 3))
+
+    released = []
+    monkeypatch.setattr(int8, "_ORIG_CUDA_INT8_LINEAR", backend)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (20 * 1024**2, 15 * 1024**3))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: released.append(True))
+
+    result = int8._call_cuda_int8_with_oom_retry(
+        torch.ones((1, 2)),
+        torch.ones((3, 2), dtype=torch.int8),
+        torch.ones((3,)),
+        None,
+        torch.bfloat16,
+        False,
+        256,
+        None,
+    )
+
+    assert result.shape == (1, 3)
+    assert len(calls) == 2
+    assert released == [True]
 
 
 def test_cuda_worker_bootstrap_requires_bounded_profile_before_import(monkeypatch):
