@@ -72,7 +72,8 @@ def test_ray_node_uses_community_runtime_and_sampler_wrappers(monkeypatch):
         "system_ram",
     )
 
-    assert result is source.cloned
+    assert result is source
+    assert source.cloned is None
     assert [event[0] for event in events] == ["validate", "require", "install"]
     assert events[0][1]["history_storage"] == "system_ram"
 

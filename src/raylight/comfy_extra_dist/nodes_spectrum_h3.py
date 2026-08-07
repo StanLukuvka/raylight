@@ -97,7 +97,11 @@ class RaySpectrumApplyMiniMaxH3:
             history_storage=str(history_storage),
             debug=bool(debug),
         ).validate()
-        patched = model.clone()
+        # Ray actors own one linear model state; unlike an ordinary ComfyUI graph
+        # branch, this patch has no second consumer to protect. Cloning the
+        # already-FSDP-wrapped patcher can retain duplicate CUDA materialization
+        # state before Spectrum's first (still-actual) warmup step.
+        patched = model
         locate_inner = getattr(minimax_h3, "locate_minimax_h3_inner", None)
         fsdp_native = locate_inner is not None and _is_fsdp_wrapped_native_minimax_h3(
             patched, locate_inner

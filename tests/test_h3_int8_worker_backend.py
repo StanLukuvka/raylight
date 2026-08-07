@@ -164,6 +164,8 @@ def test_cuda_int8_is_timed_and_eager_fallback_fails_closed():
     assert "return _profiled_cuda_int8_linear(" in source
     assert "cuda_backend.int8_linear = _profiled_cuda_int8_linear" not in source
     assert 'backend="cuda"' in source
+    assert "def _release_cuda_cache_for_large_output(" in source
+    assert "_release_cuda_cache_for_large_output(x, weight, out_dtype)" in source
 
 
 def test_bob_triton_is_a_single_worker_local_backend_branch():

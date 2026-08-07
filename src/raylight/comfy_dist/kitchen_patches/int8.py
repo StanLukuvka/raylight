@@ -200,6 +200,31 @@ def _bounded_eager_int8_linear(
     return output.reshape(*orig_shape[:-1], weight.shape[0])
 
 
+def _release_cuda_cache_for_large_output(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> None:
+    """Defragment AIMDO's pool before an H3-sized CUDA INT8 output allocation."""
+    output_rows = x.numel() // x.shape[-1]
+    output_bytes = output_rows * weight.shape[0] * torch.tensor([], dtype=out_dtype).element_size()
+    if output_bytes < 256 * 1024 * 1024:
+        return
+    free_before, _ = torch.cuda.mem_get_info(x.device)
+    required = output_bytes + 64 * 1024 * 1024
+    if free_before >= required:
+        return
+    torch.cuda.empty_cache()
+    free_after, _ = torch.cuda.mem_get_info(x.device)
+    print(
+        "[raylight-int8-cache-release] "
+        f"rank={os.environ.get('RAYLIGHT_RANK', '-1')} "
+        f"output_mib={output_bytes / (1024 * 1024):.1f} "
+        f"free_before_mib={free_before / (1024 * 1024):.1f} "
+        f"free_after_mib={free_after / (1024 * 1024):.1f}"
+    )
+
+
 def _profiled_cuda_int8_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -226,6 +251,7 @@ def _profiled_cuda_int8_linear(
         phase_start = torch.cuda.Event(enable_timing=True)
         phase_start.record()
 
+    _release_cuda_cache_for_large_output(x, weight, out_dtype)
     result = cast(Any, _ORIG_CUDA_INT8_LINEAR)(
         x=x,
         weight=weight,
