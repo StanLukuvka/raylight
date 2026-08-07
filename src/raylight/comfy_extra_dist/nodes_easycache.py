@@ -124,22 +124,26 @@ class DistributedEasyCacheHolder(EasyCacheHolder, DistributedCacheMixin):
         )
         DistributedCacheMixin.__init__(self, enable_sync=distributed_sync)
         self.distributed_sync = distributed_sync
+        self.uuid_cache_diffs_audio = {}
 
     def check_metadata(self, x: torch.Tensor) -> None:
         return
 
-    def apply_cache_diff(self, x: torch.Tensor, uuids: List) -> torch.Tensor:
-        if self.first_cond_uuid in uuids:
+    def apply_cache_diff(
+        self, x: torch.Tensor, uuids: List, is_audio: bool = False
+    ) -> torch.Tensor:
+        if self.first_cond_uuid in uuids and not is_audio:
             self.total_steps_skipped += 1
 
         out = x
+        cache_diffs = self.uuid_cache_diffs_audio if is_audio else self.uuid_cache_diffs
         batch_offset = out.shape[0] // max(len(uuids), 1)
 
         for i, uuid in enumerate(uuids):
-            if uuid not in self.uuid_cache_diffs:
+            if uuid not in cache_diffs:
                 continue
             xi = out[i * batch_offset: (i + 1) * batch_offset]
-            di = self.uuid_cache_diffs[uuid].to(device=xi.device, dtype=xi.dtype)
+            di = cache_diffs[uuid].to(device=xi.device, dtype=xi.dtype)
 
             if xi.shape[1:] != di.shape[1:]:
                 min_shape = tuple(min(a, b) for a, b in zip(xi.shape[1:], di.shape[1:]))
@@ -153,7 +157,10 @@ class DistributedEasyCacheHolder(EasyCacheHolder, DistributedCacheMixin):
             out[i * batch_offset: (i + 1) * batch_offset] = xi
         return out
 
-    def update_cache_diff(self, output: torch.Tensor, x: torch.Tensor, uuids: List) -> None:
+    def update_cache_diff(
+        self, output: torch.Tensor, x: torch.Tensor, uuids: List, is_audio: bool = False
+    ) -> None:
+        cache_diffs = self.uuid_cache_diffs_audio if is_audio else self.uuid_cache_diffs
         batch_offset = output.shape[0] // max(len(uuids), 1)
         for i, uuid in enumerate(uuids):
             yo = output[i * batch_offset: (i + 1) * batch_offset]
@@ -165,7 +172,12 @@ class DistributedEasyCacheHolder(EasyCacheHolder, DistributedCacheMixin):
                 slice_x = (slice(None),) + tuple(slice(0, s) for s in min_shape)
                 yo = yo[slice_y]
                 xi = xi[slice_x]
-            self.uuid_cache_diffs[uuid] = (yo - xi).detach().clone()
+            cache_diffs[uuid] = (yo - xi).detach().clone()
+
+    def reset(self):
+        EasyCacheHolder.reset(self)
+        self.uuid_cache_diffs_audio = {}
+        return self
 
     def clone(self):
         return DistributedEasyCacheHolder(
@@ -188,8 +200,18 @@ def _extract_transformer_options(args: Sequence[Any], kwargs: Dict[str, Any]) ->
     return transformer_options
 
 
+def _extract_cache_streams(data: Any) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if isinstance(data, list):
+        if len(data) != 2 or not all(isinstance(stream, torch.Tensor) for stream in data):
+            raise TypeError("EasyCache expects MiniMax H3 output as [video_tensor, audio_tensor]")
+        return data[0], data[1]
+    if not isinstance(data, torch.Tensor):
+        raise TypeError(f"EasyCache expected tensor or H3 AV list, got {type(data).__name__}")
+    return data, None
+
+
 def distributed_easycache_forward_wrapper(executor, *args, **kwargs):
-    x: torch.Tensor = args[0]
+    x, audio_x = _extract_cache_streams(args[0])
     transformer_options = _extract_transformer_options(args, kwargs)
     easycache: DistributedEasyCacheHolder = transformer_options["easycache"]
     sigmas = transformer_options["sigmas"]
@@ -206,6 +228,7 @@ def distributed_easycache_forward_wrapper(executor, *args, **kwargs):
     elif easycache.first_cond_uuid not in uuids:
         easycache.first_cond_uuid = uuids[0]
         easycache.uuid_cache_diffs = {}
+        easycache.uuid_cache_diffs_audio = {}
         easycache.x_prev_subsampled = None
         easycache.output_prev_subsampled = None
         easycache.output_prev_norm = None
@@ -241,7 +264,10 @@ def distributed_easycache_forward_wrapper(executor, *args, **kwargs):
             )
         if easycache.verbose and easycache.is_log_rank:
             logging.info("[EasyCache] SKIP(carry) — updated prev-step refs; returning cached diff.")
-        return easycache.apply_cache_diff(x, uuids)
+        result = easycache.apply_cache_diff(x, uuids)
+        if audio_x is not None:
+            return [result, easycache.apply_cache_diff(audio_x, uuids, is_audio=True)]
+        return result
 
     if do_easycache and has_first_cond_uuid:
         if easycache.initial_step:
@@ -293,11 +319,15 @@ def distributed_easycache_forward_wrapper(executor, *args, **kwargs):
                         easycache.cumulative_change_rate,
                         easycache.reuse_threshold,
                     )
-                return easycache.apply_cache_diff(x, uuids)
+                result = easycache.apply_cache_diff(x, uuids)
+                if audio_x is not None:
+                    return [result, easycache.apply_cache_diff(audio_x, uuids, is_audio=True)]
+                return result
             else:
                 easycache.cumulative_change_rate = 0.0
 
-    output: torch.Tensor = executor(*args, **kwargs)
+    full_output = executor(*args, **kwargs)
+    output, audio_output = _extract_cache_streams(full_output)
 
     if has_first_cond_uuid:
         out_sub = easycache.subsample(output, uuids, clone=False)
@@ -314,6 +344,8 @@ def distributed_easycache_forward_wrapper(executor, *args, **kwargs):
                 easycache.relative_transformation_rate = None
 
     easycache.update_cache_diff(output, next_x_prev, uuids)
+    if audio_output is not None and audio_x is not None:
+        easycache.update_cache_diff(audio_output, audio_x, uuids, is_audio=True)
     if has_first_cond_uuid:
         easycache.x_prev_subsampled = easycache.subsample(next_x_prev, uuids)
         easycache.output_prev_subsampled = easycache.subsample(output, uuids)
@@ -324,7 +356,7 @@ def distributed_easycache_forward_wrapper(executor, *args, **kwargs):
         if easycache.verbose and easycache.is_log_rank:
             logging.info("EasyCache — updated prev refs; x_prev_subsampled shape=%s",
                          tuple(easycache.x_prev_subsampled.shape))
-    return output
+    return full_output
 
 
 def distributed_easycache_calc_cond_batch_wrapper(executor, *args, **kwargs):
