@@ -378,13 +378,11 @@ if hasattr(model_base, "MiniMaxH3"):
         from ..diffusion_models.minimax.xdit_context_parallel import (
             usp_attn_forward,
             usp_dit_forward,
-            usp_run_blocks,
         )
 
         model = base_model.diffusion_model
         for block in model.blocks:
             block.attn.forward = types.MethodType(usp_attn_forward, block.attn)
-        model._run_blocks = types.MethodType(usp_run_blocks, model)
         model._forward = types.MethodType(usp_dit_forward, model)
 
 

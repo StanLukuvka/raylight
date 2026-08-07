@@ -78,7 +78,6 @@ def test_ray_runtime_env_explicitly_propagates_h3_diagnostic_controls():
 def test_ray_runtime_env_uploads_pinned_community_accelerators_for_local_and_remote_workers():
     source = NODES_PATH.read_text()
     assert "RAYLIGHT_SPECTRUM_H3_PACKAGE" in source
-    assert "RAYLIGHT_TE_SPEED_H3_PACKAGE" in source
     assert source.count("*_community_accelerator_modules()") == 2
 
 

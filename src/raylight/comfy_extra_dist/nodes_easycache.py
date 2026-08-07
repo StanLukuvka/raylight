@@ -22,9 +22,16 @@ class DistributedCacheMixin:
             and torch.distributed.is_initialized()
         )
         self._dist_backend: Optional[str] = None
+        self._sync_group = None
         if self._distributed:
+            from xfuser.core.distributed import (
+                get_sequence_parallel_world_size,
+                get_sp_group,
+            )
+
             self._rank = torch.distributed.get_rank()
-            self._world_size = torch.distributed.get_world_size()
+            self._world_size = get_sequence_parallel_world_size()
+            self._sync_group = get_sp_group()
             try:
                 self._dist_backend = str(torch.distributed.get_backend())
             except Exception:
@@ -79,7 +86,8 @@ class DistributedCacheMixin:
             reduce_op = torch.distributed.ReduceOp.SUM
         else:
             raise ValueError(f"Unsupported reduction op '{op}'")
-        torch.distributed.all_reduce(tensor, op=reduce_op)
+        assert self._sync_group is not None
+        self._sync_group.all_reduce(tensor, op=reduce_op)
         if op == "mean":
             tensor /= float(self._world_size)
         return float(tensor.item())
@@ -89,7 +97,8 @@ class DistributedCacheMixin:
             return flag
         t = torch.tensor(1 if flag else 0, device=self._sync_device, dtype=torch.int32)
         op = torch.distributed.ReduceOp.MIN if mode == "all" else torch.distributed.ReduceOp.MAX
-        torch.distributed.all_reduce(t, op=op)
+        assert self._sync_group is not None
+        self._sync_group.all_reduce(t, op=op)
         return bool(int(t.item()) != 0)
 
 

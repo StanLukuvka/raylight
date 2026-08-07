@@ -97,14 +97,6 @@ if globals()["INSTALL_SPECTRUM_H3"]:
     os.environ["RAYLIGHT_SPECTRUM_H3_PACKAGE"] = f"{globals()['SPECTRUM_H3_DIR']}/comfyui_spectrum_h3"
 else:
     os.environ.pop("RAYLIGHT_SPECTRUM_H3_PACKAGE", None)
-_default("INSTALL_TE_SPEED_H3", True)
-_default("TE_SPEED_H3_REPO_URL", "https://github.com/HELPMEEADICE/TE-Speed-MiniMaxH3-OSS.git")
-_default("TE_SPEED_H3_COMMIT", "c1dacf47bc02cb9326f7b93c69280529b93d391b")
-_default("TE_SPEED_H3_DIR", f"{comfy_dir}/custom_nodes/te_speed_minimax_h3_oss")
-if globals()["INSTALL_TE_SPEED_H3"]:
-    os.environ["RAYLIGHT_TE_SPEED_H3_PACKAGE"] = str(globals()["TE_SPEED_H3_DIR"])
-else:
-    os.environ.pop("RAYLIGHT_TE_SPEED_H3_PACKAGE", None)
 _default("USE_SYSTEM_SITE_PACKAGES", True)
 _default("DEPENDENCY_PROFILE", "compatible-v5-kernels-0.14.0")
 _default("EXTRA_PIP_PACKAGES", [
@@ -152,7 +144,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "326b5df220db02522afcf9a716cee5f89ccd182d5e0529ef205d2fffb77a7108"
+provisioner_sha256 = "ad6ad416a612c96a976a394ba15b9c27ab9a7c1449f658d2b01ef0cc8f771def"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:

@@ -6,12 +6,12 @@ This audit is for Raylight's exact two-rank Ulysses MiniMax-H3 path on 2× Tesla
 
 ## Result
 
-Two existing community implementations are suitable for bounded experiments:
+Two existing Raylight/ComfyUI paths are suitable for bounded experiments:
 
 1. [ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3), pinned at `85ec1da66277e893079ecd46e32cc865c56cfe53`.
-2. [TE-Speed-MiniMaxH3-OSS](https://github.com/HELPMEEADICE/TE-Speed-MiniMaxH3-OSS), pinned at `c1dacf47bc02cb9326f7b93c69280529b93d391b`.
+2. Raylight's existing `RayEasyCache` node, backed by ComfyUI's established EasyCache implementation and Raylight's distributed wrapper.
 
-Raylight does not copy either algorithm. It installs each repository at its pinned commit and exposes a thin `RAY_ACTORS` adapter. Spectrum's existing runtime and forecaster are used unchanged. TE-Speed's existing node and cache state are used unchanged.
+Spectrum remains an external pinned dependency. EasyCache is already part of Raylight, so the notebook adds no second cache plugin or block-loop adapter.
 
 Neither optimization is accepted for production yet. Both change the denoising trajectory and require bounded dual-T4 testing and fixed-seed video/audio review.
 
@@ -19,17 +19,16 @@ Neither optimization is accepted for production yet. Both change the denoising t
 
 ### EasyCache and TeaCache in ComfyUI/Raylight
 
-The existing `RayEasyCache` and `RayTeaCache` nodes operate around the complete diffusion-model call. They compare consecutive model input tensors, then reuse a cached output residual or output-derived estimate.
+The existing `RayEasyCache` node operates around the complete diffusion-model call. It compares consecutive model inputs and reuses a cached output residual when the accumulated change remains below a threshold.
 
-This is not a safe MiniMax-H3 integration:
+Why it is selected here:
 
-- H3 receives joint video/audio input rather than one tensor, while the generic implementation assumes properties such as `x.shape` and tensor subtraction.
-- The generic metadata hook is not an H3 topology contract.
-- It does not prove correspondence for packed text, reference, target-video, and target-audio segments.
-- It does not synchronize cache decisions across Ulysses ranks.
-- A differing rank decision can deadlock on the next attention collective.
+- it is the established ComfyUI/Raylight cache surface rather than a niche H3-only plugin;
+- Raylight already owns its worker patching, cache lifecycle, and distributed decision synchronization;
+- no external cache checkout, copied H3 `_forward`, or partial block-loop hook is required;
+- `distributed_sync=True` is retained for the exact two-rank Ulysses notebook.
 
-These nodes remain available for their existing supported models but are not wired into the H3 workflow.
+H3 video/audio quality and skip-rate behavior are still unproven. EasyCache is therefore supplied as a separate workflow from Spectrum and must pass the same bounded two-T4 test before a combined graph is attempted.
 
 ### MiniMaxH3-Cache / Trent MiniMax H3 Cache
 
@@ -61,42 +60,6 @@ Why it was not selected:
 - The original is GPL-3.0. The Trent repository-level MIT label does not erase the source file's stated GPL provenance.
 - Advertised quality and speed are not backed by a controlled H3 video/audio benchmark in the reviewed repository.
 
-### TE-Speed MiniMax-H3 OSS
-
-Source: [TE-Speed-MiniMaxH3-OSS](https://github.com/HELPMEEADICE/TE-Speed-MiniMaxH3-OSS), LGPL-3.0, pinned at `c1dacf47bc02cb9326f7b93c69280529b93d391b`.
-
-Mechanism:
-
-- On a full step, run all blocks and retain the residual from the output of a warm prefix to the complete output.
-- On a cache step, recompute the warm prefix and add the prior tail residual instead of running the remaining blocks.
-- Default `cache_depth=0.75` recomputes approximately the first quarter of the 50 blocks.
-- Eligibility depends on schedule position, adjacent sigma difference, available residual, and a maximum consecutive-cache count.
-- CFG calls at the same sigma reuse the same full/cache decision.
-
-Cache identity and invalidation:
-
-- first sigma of a run is full;
-- an increasing sigma indicates a new run and resets state;
-- the cache stores one prior tail residual plus a warm-boundary snapshot;
-- there is no explicit layout, conditioning, or model-weight hash;
-- changing geometry inside one sampling run is therefore unsupported;
-- normal separate Comfy sampling runs reset because their schedule restarts at high sigma.
-
-Distributed compatibility:
-
-- The residual and snapshot are rank-local after Raylight's Ulysses split.
-- The decision inputs are schedule scalars and counters, so they should be identical on both ranks.
-- Raylight additionally all-reduces the requested `[start, end)` block range before executing any block. A disagreement fails on both ranks before entering attention collectives.
-- The plugin's algorithm is imported unchanged; Raylight only exposes the block-loop contract it expects.
-
-Memory:
-
-- At the accepted workload, one rank-local hidden state is approximately 58.96 MiB.
-- With Raylight's default `device=cpu`, the residual occupies about 58.96 MiB of host memory per rank and the latest warm-boundary snapshot about 58.96 MiB of GPU memory per rank.
-- A full-step residual calculation can transiently hold another rank-local tensor, so the bounded first-forward and full-run memory gates remain mandatory.
-
-The repository claims approximately 45% speedup for its 30-step reference workflow. That is an upstream claim, not evidence for the 20-evaluation dual-T4 workload.
-
 ### Cache-DiT / SGLang
 
 Sources:
@@ -113,7 +76,7 @@ Mechanism:
 
 Distributed behavior is the strongest reviewed design: SGLang all-reduces similarity statistics over the sequence/tensor-parallel group so every rank makes one decision. SGLang also contains a custom `MiniMaxH3DiTModel` adapter.
 
-It was not plugged into Raylight now because the adapter targets SGLang's H3 class and forward signature, not ComfyUI's `MiniMaxH3Model`, and cache-dit would add a second block-hook/runtime layer. TE-Speed is the smaller existing Comfy-native experiment. Cache-DiT remains the preferred next candidate if TE-Speed demonstrates value but needs better policy or if an Apache-only path becomes necessary.
+It was not plugged into Raylight now because the adapter targets SGLang's H3 class and forward signature, not ComfyUI's `MiniMaxH3Model`, and Cache-DiT would add a second block-hook/runtime layer. Raylight's existing EasyCache is the smaller established Comfy-native experiment.
 
 ## Spectrum integration
 
@@ -165,7 +128,7 @@ Upstream reports real fidelity risks: changed motion trajectories and localized 
 - v6 remains untouched.
 - Community repositories are pinned and installed as separate dependencies; their algorithm sources are not vendored.
 - `RaySpectrumApplyMiniMaxH3` is present in the generated experimental workflow with conservative settings and system-RAM history.
-- `RayTESpeedMiniMaxH3` is available as a separate cache node; do not stack it with Spectrum until each path independently passes parity and memory tests.
+- `RayEasyCache` is available as the separate cache workflow; do not stack it with Spectrum until each path independently passes parity and memory tests.
 - First run: `608×352`, one bounded forward.
 - Second run: accepted `736×416×124`, one bounded forward.
 - Only then run all 20 evaluations.

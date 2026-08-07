@@ -306,17 +306,6 @@ def _install_custom_nodes(venv_python):
         )
         print(f"[✓] Spectrum H3 community plugin pinned at {spectrum_commit}")
 
-    if globals().get("INSTALL_TE_SPEED_H3", False):
-        te_speed_dir = Path(globals()["TE_SPEED_H3_DIR"])
-        te_speed_commit = str(globals()["TE_SPEED_H3_COMMIT"])
-        _checkout_pinned_repo(
-            globals()["TE_SPEED_H3_REPO_URL"],
-            te_speed_dir,
-            te_speed_commit,
-            clean_paths=(".",),
-        )
-        print(f"[✓] TE-Speed H3 community plugin pinned at {te_speed_commit}")
-
     if not INSTALL_RAYLIGHT:
         return False
 

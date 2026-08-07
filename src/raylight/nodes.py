@@ -123,19 +123,13 @@ def _ensure_runtime_workdir(module_dir: Path) -> Path:
 
 
 def _community_accelerator_modules() -> list[str]:
-    modules = []
-    for label, env_name in (
-        ("Spectrum H3", "RAYLIGHT_SPECTRUM_H3_PACKAGE"),
-        ("TE-Speed H3", "RAYLIGHT_TE_SPEED_H3_PACKAGE"),
-    ):
-        package = os.environ.get(env_name)
-        if not package:
-            continue
-        package_path = Path(package).resolve()
-        if not package_path.is_dir():
-            raise RuntimeError(f"{label} package path does not exist: {package_path}")
-        modules.append(str(package_path))
-    return modules
+    package = os.environ.get("RAYLIGHT_SPECTRUM_H3_PACKAGE")
+    if not package:
+        return []
+    package_path = Path(package).resolve()
+    if not package_path.is_dir():
+        raise RuntimeError(f"Spectrum H3 package path does not exist: {package_path}")
+    return [str(package_path)]
 
 
 def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir: Path):
