@@ -10,6 +10,7 @@ import torch.distributed as dist
 RUNTIME_KEY = "spectrum_h3_runtime"
 RUN_ID_KEY = "spectrum_h3_run_id"
 STEP_ID_KEY = "spectrum_h3_step_id"
+_SANITIZE_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,30 @@ def _any_rank(value: bool) -> bool:
 
 def _all_ranks(value: bool) -> bool:
     return _distributed_bool(value, dist.ReduceOp.MIN)
+
+
+def _sanitize_prediction_bounded(
+    feature: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Apply the donor's finite/range policy without full-feature FP32 temporaries."""
+    if not dtype.is_floating_point:
+        return None
+    if feature.dtype != dtype or not feature.is_contiguous():
+        feature = feature.to(dtype=dtype).contiguous()
+    flat = feature.reshape(-1)
+    chunk_elements = max(1, _SANITIZE_CHUNK_BYTES // torch.tensor([], dtype=torch.float32).element_size())
+    any_finite = False
+    finfo = torch.finfo(dtype)
+    for offset in range(0, flat.numel(), chunk_elements):
+        target = flat.narrow(0, offset, min(chunk_elements, flat.numel() - offset))
+        fp32 = target.to(torch.float32)
+        finite = torch.isfinite(fp32)
+        any_finite = any_finite or bool(finite.any().item())
+        torch.nan_to_num_(fp32, nan=0.0, posinf=finfo.max, neginf=finfo.min)
+        fp32.clamp_(min=finfo.min, max=finfo.max)
+        target.copy_(fp32)
+    return feature if any_finite else None
 
 
 def begin_spectrum_call(
@@ -113,11 +138,10 @@ def predict_spectrum_feature(
             dtype=dtype,
         )
         if predicted is not None:
-            # Use the pinned community implementation's own finite/range policy;
-            # the distributed adapter must not create a weaker forecast path.
-            from comfyui_spectrum_h3.minimax_h3 import _sanitize_prediction
-
-            predicted, _ = _sanitize_prediction(predicted, dtype)
+            # Preserve the donor's finite/range policy, but chunk it: the donor
+            # materializes several complete FP32 copies of this ~59 MiB BF16
+            # feature and can exhaust the T4's measured 568-678 MiB headroom.
+            predicted = _sanitize_prediction_bounded(predicted, dtype)
     except Exception as exc:  # synchronize failure before any later collective
         error = exc
 

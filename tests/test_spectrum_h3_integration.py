@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from raylight.spectrum_h3 import (
+    _sanitize_prediction_bounded,
     begin_spectrum_call,
     observe_spectrum_feature,
     predict_spectrum_feature,
@@ -70,6 +71,27 @@ def _install_community_forecast_contract(monkeypatch):
 
 def test_absent_community_runtime_keeps_native_path():
     assert begin_spectrum_call({}, (1, 4, 8), ("topology",), ((0, "uuid"),)) is None
+
+
+def test_bounded_sanitizer_matches_donor_policy_without_full_fp32_output(monkeypatch):
+    import raylight.spectrum_h3 as spectrum_h3
+
+    monkeypatch.setattr(spectrum_h3, "_SANITIZE_CHUNK_BYTES", 16)
+    values = torch.tensor(
+        [0.0, float("nan"), float("inf"), -float("inf"), 2.0, -3.0],
+        dtype=torch.bfloat16,
+    )
+    result = _sanitize_prediction_bounded(values, torch.bfloat16)
+
+    assert result is values
+    assert result is not None
+    assert torch.isfinite(result).all()
+    assert result.tolist()[1:] == [0.0, torch.finfo(torch.bfloat16).max, torch.finfo(torch.bfloat16).min, 2.0, -3.0]
+
+
+def test_bounded_sanitizer_rejects_an_entirely_nonfinite_prediction():
+    values = torch.full((32,), float("nan"), dtype=torch.bfloat16)
+    assert _sanitize_prediction_bounded(values, torch.bfloat16) is None
 
 
 def test_distributed_actual_decision_forces_local_forecast_rank_to_compute():
