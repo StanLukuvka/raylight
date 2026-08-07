@@ -3,6 +3,33 @@ from __future__ import annotations
 from .ray_patch_decorator import ray_patch
 
 
+def _is_fsdp_wrapped_native_minimax_h3(model, locate_inner) -> bool:
+    inner, path = locate_inner(model)
+    if inner is None or path is None or type(inner).__name__ == "MiniMaxH3Model":
+        return False
+    native_base = any(
+        cls.__name__ == "MiniMaxH3Model" and cls.__module__ == "comfy.ldm.minimax.model"
+        for cls in type(inner).__mro__[1:]
+    )
+    required = (
+        "blocks",
+        "final_layer",
+        "hidden_size",
+        "patch_size",
+        "latents_dim",
+        "audio_latents_dim",
+        "sigma_shift_video",
+        "sigma_shift_audio",
+        "use_adaln_curves",
+    )
+    if not native_base or not all(hasattr(inner, name) for name in required):
+        return False
+    if not isinstance(inner.use_adaln_curves, bool):
+        return False
+    timestep_attribute = "adaln_t_table" if inner.use_adaln_curves else "time_embedder"
+    return hasattr(inner, timestep_attribute)
+
+
 class RaySpectrumApplyMiniMaxH3:
     @classmethod
     def INPUT_TYPES(cls):
@@ -53,7 +80,7 @@ class RaySpectrumApplyMiniMaxH3:
         # supplied by the existing community plugin. Raylight only adapts its
         # model-call boundary to rank-local Ulysses hidden state.
         from comfyui_spectrum_h3.config import SpectrumH3Config
-        from comfyui_spectrum_h3.minimax_h3 import require_native_minimax_h3
+        from comfyui_spectrum_h3 import minimax_h3
         from comfyui_spectrum_h3.runtime import SpectrumH3Runtime
         from comfyui_spectrum_h3.sampling import install_sampler_wrappers
 
@@ -71,7 +98,12 @@ class RaySpectrumApplyMiniMaxH3:
             debug=bool(debug),
         ).validate()
         patched = model.clone()
-        require_native_minimax_h3(patched)
+        locate_inner = getattr(minimax_h3, "locate_minimax_h3_inner", None)
+        fsdp_native = locate_inner is not None and _is_fsdp_wrapped_native_minimax_h3(
+            patched, locate_inner
+        )
+        if not fsdp_native:
+            minimax_h3.require_native_minimax_h3(patched)
         install_sampler_wrappers(patched, SpectrumH3Runtime(config))
         return patched
 
