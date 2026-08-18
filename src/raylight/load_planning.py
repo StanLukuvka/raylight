@@ -24,8 +24,9 @@ def load_workers_sequentially(
     shard materialization, and full-state release before it returns. This
     helper intentionally trades setup latency for a bounded aggregate peak.
 
-    Kept as the conservative fallback.  Parallel loading is now the default;
-    set ``RAYLIGHT_SEQUENTIAL_QUANT_LOAD=1`` to select this helper instead.
+    Kept as the default for quantized loads.  Parallel fan-out is available
+    via ``RAYLIGHT_PARALLEL_QUANT_LOAD=1`` for hosts with confirmed headroom;
+    call :func:`load_workers_fanout` to select it instead.
     """
     for worker_index, worker in enumerate(workers):
         phase_context = phase(worker_index) if phase is not None else nullcontext()
@@ -42,9 +43,9 @@ def load_workers_fanout(
     """Start every worker load, then collect every result (parallel fan-out).
 
     Each rank maps the checkpoint and materializes its own quantized shards
-    onto its own GPU.  With the host-RAM cap active the aggregate transient
-    peak stays bounded, so forcing rank 0 to finish before rank 1 starts just
-    serializes ~100 seconds of per-rank materialization for nothing.
+    onto its own GPU.  Opt-in only: on cgroup-limited hosts with thin host
+    headroom the concurrent transient peak can thrash (see docs/19).  Callers
+    select this helper behind ``RAYLIGHT_PARALLEL_QUANT_LOAD=1``.
 
     ``wait`` is called once per started worker immediately (Ray queues the
     remote call and blocks on result readiness), which preserves per-worker

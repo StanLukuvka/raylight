@@ -38,39 +38,40 @@ from .worker_cleanup import (
 def _quant_loading_mode() -> str:
     """Report the active quantized loading mode (sequential or fan-out)."""
     return (
-        "fsdp_quantized_sequential"
-        if os.environ.get("RAYLIGHT_SEQUENTIAL_QUANT_LOAD", "") == "1"
-        else "fsdp_quantized_fanout"
+        "fsdp_quantized_fanout"
+        if os.environ.get("RAYLIGHT_PARALLEL_QUANT_LOAD", "") == "1"
+        else "fsdp_quantized_sequential"
     )
 
 
 def _load_quant_workers(gpu_actors, unet_path, model_options):
     """Load quantized workers with the configured strategy.
 
-    Default is a parallel fan-out: every rank maps the same checkpoint and
-    materializes its own shards concurrently, on its own GPU. The host-RAM cap
-    keeps the aggregate transient peak bounded, so the old sequential gate
-    (rank 0 fully done before rank 1 starts) is pure latency.
+    Default is sequential: rank 0 finishes checkpoint mapping and FSDP
+    materialization before rank 1 starts.  Concurrent ranks overlap large
+    host allocations; the v6 full run had only ~2.4 GiB of host headroom and
+    the Kaggle cgroup thrashes or OOM-kills under the parallel transient peak.
+    This order is the validated contract from docs/19.
 
-    ``RAYLIGHT_SEQUENTIAL_QUANT_LOAD=1`` restores the conservative one-at-a-time
-    order if a future host rejects the parallel transient peak.
+    ``RAYLIGHT_PARALLEL_QUANT_LOAD=1`` opts into the parallel fan-out for
+    hosts with confirmed headroom.
     """
-    if os.environ.get("RAYLIGHT_SEQUENTIAL_QUANT_LOAD", "") == "1":
-        load_workers_sequentially(
+    if os.environ.get("RAYLIGHT_PARALLEL_QUANT_LOAD", "") == "1":
+        load_workers_fanout(
             gpu_actors,
             start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
             wait=ray.get,
-            phase=lambda worker_index: load_phase(
-                "worker_load_rpc",
-                worker_index=worker_index,
-                checkpoint_name=Path(unet_path).name,
-            ),
         )
         return
-    load_workers_fanout(
+    load_workers_sequentially(
         gpu_actors,
         start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
         wait=ray.get,
+        phase=lambda worker_index: load_phase(
+            "worker_load_rpc",
+            worker_index=worker_index,
+            checkpoint_name=Path(unet_path).name,
+        ),
     )
 
 
