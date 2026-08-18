@@ -30,17 +30,26 @@ from pathlib import Path
 
 
 def _require_config():
+    # H3_WIDTH/H3_HEIGHT/H3_LENGTH are optional in Section 1 — default to the
+    # accepted dual-T4 diagnostic profile.  Users may override these if needed.
     required = [
         "ACTION", "ACTIVE_PROFILE", "WORK_DIR", "VENV_DIR", "COMFY_DIR",
         "COMFY_REPO_URL", "COMFY_INSTANCES", "REQUIRED_MODELS",
-        "MODEL_ROOTS", "ENABLE_CLOUDFLARE", "H3_WIDTH", "H3_HEIGHT", "H3_LENGTH",
+        "MODEL_ROOTS", "ENABLE_CLOUDFLARE",
     ]
     missing = [name for name in required if name not in globals()]
     if missing:
         raise RuntimeError("Run Section 1 first. Missing: " + ", ".join(missing))
-    h3_width = int(globals()["H3_WIDTH"])
-    h3_height = int(globals()["H3_HEIGHT"])
-    h3_length = int(globals()["H3_LENGTH"])
+    # H3 geometry: defaults to the accepted bounded diagnostic profile.
+    H3_WIDTH = globals().setdefault("H3_WIDTH", 608)
+    H3_HEIGHT = globals().setdefault("H3_HEIGHT", 352)
+    H3_LENGTH = globals().setdefault("H3_LENGTH", 124)
+    globals()["H3_WIDTH"] = int(H3_WIDTH)
+    globals()["H3_HEIGHT"] = int(H3_HEIGHT)
+    globals()["H3_LENGTH"] = int(H3_LENGTH)
+    h3_width = globals()["H3_WIDTH"]
+    h3_height = globals()["H3_HEIGHT"]
+    h3_length = globals()["H3_LENGTH"]
     if h3_width <= 0 or h3_height <= 0:
         raise ValueError(f"H3 dimensions must be positive, got {h3_width}x{h3_height}")
     if h3_width % 32 or h3_height % 32:
