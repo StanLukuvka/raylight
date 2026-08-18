@@ -44,9 +44,6 @@ def test_compact_notebook_entry_defines_complete_configuration_before_dispatch()
     }
     assert required <= namespace.keys()
     assert namespace["ACTION"] == "status"
-    assert namespace["H3_WIDTH"] == 608
-    assert namespace["H3_HEIGHT"] == 352
-    assert namespace["H3_LENGTH"] == 124
     assert namespace["INT8_ACCUMULATOR_MIB"] == 128
     assert namespace["H3_MEMORY_TRACE"] is False
     assert namespace["H3_STOP_AFTER_FIRST_FORWARD"] is False

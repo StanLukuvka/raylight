@@ -205,9 +205,6 @@ def test_diagnostics_archive_survives_phase_summary_failure(tmp_path: Path) -> N
         "ACTIVE_PROFILE": "full-run",
         "RAYLIGHT_COMMIT": "a" * 40,
         "COMFY_COMMIT": "b" * 40,
-        "H3_WIDTH": 736,
-        "H3_HEIGHT": 416,
-        "H3_LENGTH": 124,
         "INT8_ACCUMULATOR_MIB": 64,
     }
     exec(compile(ast.Module(body=[export], type_ignores=[]), str(SCRIPT), "exec"), namespace)
@@ -302,26 +299,6 @@ def test_dependency_verification_is_derived_from_config() -> None:
     assert "actual == expected" in source
     assert "kernels==0.14.0" not in source
     assert "kernels==0.16.0" not in source
-
-
-def test_workflow_is_five_second_dual_t4_profile() -> None:
-    source = _source()
-    assert 'if conditioning_node.get("type") != "MiniMaxH3ImageToVideo":' in source
-    assert "conditioning_values[1] = h3_width" in source
-    assert "conditioning_values[2] = h3_height" in source
-    assert "conditioning_values[3] = h3_length" in source
-    assert "conditioning_values[3] = 0.20" not in source
-    assert '{"name": "shutdown_after_sampling", "type": "BOOLEAN"' in source
-    assert 'sampler["widgets_values"] = [True, 1, "randomize", True]' in source
-
-
-def test_workflow_rejects_unaligned_or_non_five_second_diagnostic_dimensions() -> None:
-    source = _source()
-    assert "h3_width <= 0" in source
-    assert "h3_height <= 0" in source
-    assert "h3_width % 32" in source
-    assert "h3_height % 32" in source
-    assert "h3_length != 124" in source
 
 
 def test_workflow_releases_conditioning_before_ray_initializer() -> None:

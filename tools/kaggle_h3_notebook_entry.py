@@ -19,9 +19,6 @@ globals().setdefault("ACTION", "start")
 globals().setdefault("USE_FAKE_MODEL_STUBS", False)
 globals().setdefault("VERIFY_MODEL_SHA256", False)
 globals().setdefault("ENABLE_CLOUDFLARE", True)
-H3_WIDTH = globals().setdefault("H3_WIDTH", 608)
-H3_HEIGHT = globals().setdefault("H3_HEIGHT", 352)
-H3_LENGTH = globals().setdefault("H3_LENGTH", 124)
 INT8_ACCUMULATOR_MIB = globals().setdefault("INT8_ACCUMULATOR_MIB", 128)
 H3_MEMORY_TRACE = globals().setdefault("H3_MEMORY_TRACE", False)
 H3_STOP_AFTER_FIRST_FORWARD = globals().setdefault("H3_STOP_AFTER_FIRST_FORWARD", False)
@@ -141,7 +138,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "dac8d73830783e9c8390321ba6d2c0ee1bad5dcada9cbd79c5015e685569fa32"
+provisioner_sha256 = "849708266af937a476562701c7bd442b2c524ee0fb57daab5cd43d10986a787f"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:
@@ -155,12 +152,6 @@ if H3_AUTO_QUEUE_DIAGNOSTIC:
             [
                 sys.executable,
                 runner,
-                "--width",
-                str(H3_WIDTH),
-                "--height",
-                str(H3_HEIGHT),
-                "--length",
-                str(H3_LENGTH),
             ],
             check=True,
         )

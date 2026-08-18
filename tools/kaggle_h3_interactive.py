@@ -30,8 +30,7 @@ from pathlib import Path
 
 
 def _require_config():
-    # H3_WIDTH/H3_HEIGHT/H3_LENGTH are optional in Section 1 — default to the
-    # accepted dual-T4 diagnostic profile.  Users may override these if needed.
+
     required = [
         "ACTION", "ACTIVE_PROFILE", "WORK_DIR", "VENV_DIR", "COMFY_DIR",
         "COMFY_REPO_URL", "COMFY_INSTANCES", "REQUIRED_MODELS",
@@ -40,22 +39,7 @@ def _require_config():
     missing = [name for name in required if name not in globals()]
     if missing:
         raise RuntimeError("Run Section 1 first. Missing: " + ", ".join(missing))
-    # H3 geometry: defaults to the accepted bounded diagnostic profile.
-    H3_WIDTH = globals().setdefault("H3_WIDTH", 608)
-    H3_HEIGHT = globals().setdefault("H3_HEIGHT", 352)
-    H3_LENGTH = globals().setdefault("H3_LENGTH", 124)
-    globals()["H3_WIDTH"] = int(H3_WIDTH)
-    globals()["H3_HEIGHT"] = int(H3_HEIGHT)
-    globals()["H3_LENGTH"] = int(H3_LENGTH)
-    h3_width = globals()["H3_WIDTH"]
-    h3_height = globals()["H3_HEIGHT"]
-    h3_length = globals()["H3_LENGTH"]
-    if h3_width <= 0 or h3_height <= 0:
-        raise ValueError(f"H3 dimensions must be positive, got {h3_width}x{h3_height}")
-    if h3_width % 32 or h3_height % 32:
-        raise ValueError(f"H3 dimensions must be divisible by 32, got {h3_width}x{h3_height}")
-    if h3_length != 124:
-        raise ValueError(f"This bounded diagnostic keeps the accepted 124-frame length, got {h3_length}")
+
 
 
 def _run(cmd, *, cwd=None, check=True, env=None, quiet=False, capture=False):
@@ -458,9 +442,6 @@ def _link_kaggle_models(selected):
 
 def _make_raylight_workflow(stock_workflow):
     """Convert the official H3 subgraph without changing H3 packing or decoding."""
-    h3_width = int(globals()["H3_WIDTH"])
-    h3_height = int(globals()["H3_HEIGHT"])
-    h3_length = int(globals()["H3_LENGTH"])
     data = deepcopy(stock_workflow)
     subgraphs = data.get("definitions", {}).get("subgraphs", [])
     h3 = next((item for item in subgraphs if "MiniMax H3" in item.get("name", "")), None)
@@ -504,13 +485,11 @@ def _make_raylight_workflow(stock_workflow):
     conditioning_values = conditioning_node.get("widgets_values", [])
     if len(conditioning_values) < 4:
         raise RuntimeError("Official MiniMaxH3ImageToVideo widgets are incomplete")
+    # Prompt is overridden for the bounded diagnostic; geometry stays as-is in the stock workflow.
     conditioning_values[0] = (
         "A single red ball rolls from left to right across a plain studio floor. "
         "Locked camera, one continuous shot, no text or cuts. Simple natural rolling sound."
     )
-    conditioning_values[1] = h3_width
-    conditioning_values[2] = h3_height
-    conditioning_values[3] = h3_length
 
     initializer = {
         "id": next_node_id,
@@ -660,7 +639,6 @@ def _make_raylight_workflow(stock_workflow):
         "fsdp_cpu_offload": False,
         "attention": "TORCH_EFFICIENT",
         "fake_model_mode": bool(globals().get("USE_FAKE_MODEL_STUBS", False)),
-        "profile": {"width": h3_width, "height": h3_height, "length": h3_length},
         "int8_accumulator_mib": int(globals().get("INT8_ACCUMULATOR_MIB", 128)),
         "memory_trace": bool(globals().get("H3_MEMORY_TRACE", False)),
         "phase_profile": bool(globals().get("H3_PHASE_PROFILE", False)),
@@ -1168,11 +1146,6 @@ print("RAYLIGHT_RUNTIME_JSON=" + json.dumps({
         "gpu_count": 2,
         "gpu_identities": list(gpu_identities),
         "runtime": runtime,
-        "geometry": {
-            "width": int(globals()["H3_WIDTH"]),
-            "height": int(globals()["H3_HEIGHT"]),
-            "length": int(globals()["H3_LENGTH"]),
-        },
         "evaluations": 20,
         "int8_accumulator_mib": int(globals()["INT8_ACCUMULATOR_MIB"]),
         "distributed": {
