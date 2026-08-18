@@ -1147,7 +1147,7 @@ print("RAYLIGHT_RUNTIME_JSON=" + json.dumps({
         "gpu_identities": list(gpu_identities),
         "runtime": runtime,
         "evaluations": 20,
-        "int8_accumulator_mib": int(globals()["INT8_ACCUMULATOR_MIB"]),
+        "int8_accumulator_mib": int(globals().get("INT8_ACCUMULATOR_MIB", 128)),
         "distributed": {
             "fsdp": True,
             "ulysses_degree": 2,
