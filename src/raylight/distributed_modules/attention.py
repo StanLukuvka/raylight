@@ -2,6 +2,7 @@ from xfuser.core.long_ctx_attention import (
     xFuserLongContextAttention,
 )
 
+import torch
 from yunchang.kernels import AttnType
 from .sageattention_hf_patch import ensure_hf_fp8_cuda_kernel, ensure_hf_sm90_kernel
 
@@ -82,6 +83,17 @@ def make_xfuser_attention(attn_type, sync_ulysses):
                 mask = mask.unsqueeze(0)
             if mask.ndim == 3:
                 mask = mask.unsqueeze(1)
+        # SageAttention kernels only accept fp16/bf16 (fp8 QK variants too, see
+        # sageattention/core.py assert).  The INT8-quantized H3 model computes
+        # attention in fp32, so cast at the dispatch boundary and cast the
+        # output back.  Gated to the SAGE family so TORCH_EFFICIENT and friends
+        # stay byte-identical to upstream.
+        if attn_type.startswith("SAGE"):
+            sage_out_dtype = q.dtype
+            q, k, v = q.half(), k.half(), v.half()
+            if join_q is not None:
+                join_q, join_k, join_v = join_q.half(), join_k.half(), join_v.half()
+
         query = q.transpose(1, 2)
         key = k.transpose(1, 2)
         value = v.transpose(1, 2)
@@ -111,6 +123,8 @@ def make_xfuser_attention(attn_type, sync_ulysses):
             out = (
                 out.transpose(1, 2).reshape(b, -1, heads * dim_head)
             )
+        if attn_type.startswith("SAGE"):
+            out = out.to(sage_out_dtype)
         return out
 
     return _attention_xfuser_unmask
