@@ -236,7 +236,7 @@ def _install_dependencies(venv_python, new_checkout):
             "https://github.com/netrunner-exe/SageAttention2-Colab-Wheels/raw/main/"
             "colab-torch-2.11.0%2Bcu130/sageattention-2.1.2-cp312-cp312-linux_x86_64.whl",
             Path(WORK_DIR) / ".wheels" / "sageattention-2.1.2-cp312-cp312-linux_x86_64.whl",
-            min_bytes=20_000_000,
+            min_bytes=5_000_000,
         )
         _run(pip + ["install", "--force-reinstall", "--no-deps", str(sage_wheel)])
     check = subprocess.run(pip + ["check"], capture_output=True, text=True)
