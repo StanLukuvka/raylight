@@ -179,7 +179,7 @@ def test_diagnostics_archive_survives_phase_summary_failure(tmp_path: Path) -> N
         "gpu_identities": ["GPU 0: Tesla T4", "GPU 1: Tesla T4"],
         "distributed": {
             "shutdown_after_sampling": True,
-            "sequential_rank_materialization": True,
+            "sequential_rank_materialization": False,
         },
     }
     manifest_text = json.dumps(startup_manifest, sort_keys=True) + "\n"
@@ -222,7 +222,7 @@ def test_diagnostics_archive_survives_phase_summary_failure(tmp_path: Path) -> N
     assert manifest == startup_manifest
     assert (work_dir / "h3-run-manifest.json").read_text() == manifest_text
     assert manifest["distributed"]["shutdown_after_sampling"] is True
-    assert manifest["distributed"]["sequential_rank_materialization"] is True
+    assert manifest["distributed"]["sequential_rank_materialization"] is False
 
 
 def test_diagnostics_archive_continues_after_candidate_stat_and_write_failures(

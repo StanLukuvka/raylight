@@ -1160,7 +1160,9 @@ print("RAYLIGHT_RUNTIME_JSON=" + json.dumps({
         "distributed": {
             "fsdp": True,
             "ulysses_degree": 2,
-            "sequential_rank_materialization": True,
+            "sequential_rank_materialization": (
+                os.environ.get("RAYLIGHT_SEQUENTIAL_QUANT_LOAD", "") == "1"
+            ),
             "shutdown_after_sampling": True,
             "cooperative_shutdown_timeout_seconds": 30.0,
             "force_shutdown_timeout_seconds": 10.0,

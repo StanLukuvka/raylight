@@ -25,7 +25,7 @@ from .distributed_worker.ray_worker import (
     ray_nccl_tester,
 )
 from .distributed_worker.ray_worker_vae import combine_dist_vae_partials, combine_seedvr2_vae_partials
-from .load_planning import load_workers_sequentially
+from .load_planning import load_workers_fanout, load_workers_sequentially
 from .load_telemetry import emit_load_event, load_phase
 from .worker_cleanup import (
     raise_for_shutdown_result,
@@ -33,6 +33,45 @@ from .worker_cleanup import (
     shutdown_workers,
     submit_results,
 )
+
+
+def _quant_loading_mode() -> str:
+    """Report the active quantized loading mode (sequential or fan-out)."""
+    return (
+        "fsdp_quantized_sequential"
+        if os.environ.get("RAYLIGHT_SEQUENTIAL_QUANT_LOAD", "") == "1"
+        else "fsdp_quantized_fanout"
+    )
+
+
+def _load_quant_workers(gpu_actors, unet_path, model_options):
+    """Load quantized workers with the configured strategy.
+
+    Default is a parallel fan-out: every rank maps the same checkpoint and
+    materializes its own shards concurrently, on its own GPU. The host-RAM cap
+    keeps the aggregate transient peak bounded, so the old sequential gate
+    (rank 0 fully done before rank 1 starts) is pure latency.
+
+    ``RAYLIGHT_SEQUENTIAL_QUANT_LOAD=1`` restores the conservative one-at-a-time
+    order if a future host rejects the parallel transient peak.
+    """
+    if os.environ.get("RAYLIGHT_SEQUENTIAL_QUANT_LOAD", "") == "1":
+        load_workers_sequentially(
+            gpu_actors,
+            start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
+            wait=ray.get,
+            phase=lambda worker_index: load_phase(
+                "worker_load_rpc",
+                worker_index=worker_index,
+                checkpoint_name=Path(unet_path).name,
+            ),
+        )
+        return
+    load_workers_fanout(
+        gpu_actors,
+        start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
+        wait=ray.get,
+    )
 
 
 class AnyType(str):
@@ -1060,18 +1099,9 @@ class RayUNETLoader:
                     with load_phase(
                         "worker_model_load",
                         worker_count=len(gpu_actors),
-                        loading_mode="fsdp_quantized_sequential",
+                        loading_mode=_quant_loading_mode(),
                     ):
-                        load_workers_sequentially(
-                            gpu_actors,
-                            start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
-                            wait=ray.get,
-                            phase=lambda worker_index: load_phase(
-                                "worker_load_rpc",
-                                worker_index=worker_index,
-                                checkpoint_name=Path(unet_path).name,
-                            ),
-                        )
+                        _load_quant_workers(gpu_actors, unet_path, model_options)
 
             else:
                 # Multiple replicas — load model per group
@@ -1098,20 +1128,10 @@ class RayUNETLoader:
                         with load_phase(
                             "worker_model_load",
                             worker_count=len(group_actors),
-                            loading_mode="fsdp_quantized_sequential_group",
+                            loading_mode=_quant_loading_mode(),
                             group_id=group_id,
                         ):
-                            load_workers_sequentially(
-                                group_actors,
-                                start=lambda actor: actor.load_unet.remote(unet_path, model_options=model_options),
-                                wait=ray.get,
-                                phase=lambda worker_index: load_phase(
-                                    "worker_load_rpc",
-                                    worker_index=worker_index,
-                                    group_id=group_id,
-                                    checkpoint_name=Path(unet_path).name,
-                                ),
-                            )
+                            _load_quant_workers(group_actors, unet_path, model_options)
 
             ray.get(loaded_futures)
             loaded_futures = []

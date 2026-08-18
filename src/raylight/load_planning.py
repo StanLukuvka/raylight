@@ -1,9 +1,8 @@
-"""Small orchestration helpers for bounded-memory model loading."""
+"""Small orchestration helpers for model loading."""
 
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
 from typing import TypeVar
-
 
 Worker = TypeVar("Worker")
 Pending = TypeVar("Pending")
@@ -24,8 +23,34 @@ def load_workers_sequentially(
     worker's load operation must therefore finish checkpoint mapping, local
     shard materialization, and full-state release before it returns. This
     helper intentionally trades setup latency for a bounded aggregate peak.
+
+    Kept as the conservative fallback.  Parallel loading is now the default;
+    set ``RAYLIGHT_SEQUENTIAL_QUANT_LOAD=1`` to select this helper instead.
     """
     for worker_index, worker in enumerate(workers):
         phase_context = phase(worker_index) if phase is not None else nullcontext()
         with phase_context:
             wait(start(worker))
+
+
+def load_workers_fanout(
+    workers: Iterable[Worker],
+    *,
+    start: Callable[[Worker], Pending],
+    wait: Callable[[Pending], object],
+) -> None:
+    """Start every worker load, then collect every result (parallel fan-out).
+
+    Each rank maps the checkpoint and materializes its own quantized shards
+    onto its own GPU.  With the host-RAM cap active the aggregate transient
+    peak stays bounded, so forcing rank 0 to finish before rank 1 starts just
+    serializes ~100 seconds of per-rank materialization for nothing.
+
+    ``wait`` is called once per started worker immediately (Ray queues the
+    remote call and blocks on result readiness), which preserves per-worker
+    error attribution while letting both actors work concurrently.
+    """
+    workers = list(workers)
+    futures = [(start(worker), index) for index, worker in enumerate(workers)]
+    for future, _index in futures:
+        wait(future)
