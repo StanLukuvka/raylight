@@ -16,7 +16,7 @@ def test_full_smoke_preserves_required_h3_sampling_contract():
     assert '"ulysses_degree": 2' in source
     assert '"FSDP": True' in source
     assert '"FSDP_CPU_OFFLOAD": False' in source
-    assert '"XFuser_attention": "TORCH_EFFICIENT"' in source
+    assert '"XFuser_attention": "SAGE_FP16"' in source
     assert '"clear_vram_after_sampling": True' in source
 
 

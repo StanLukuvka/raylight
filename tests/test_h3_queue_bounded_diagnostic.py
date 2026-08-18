@@ -16,7 +16,7 @@ def test_bounded_queue_uses_exact_accepted_distributed_graph_and_two_unload_barr
         '"cfg_degree": 1',
         '"dp_degree": 1',
         '"FSDP": True',
-        '"XFuser_attention": "TORCH_EFFICIENT"',
+        '"XFuser_attention": "SAGE_FP16"',
         '"ray_object_store_gb": 0.5',
         '"ray_dashboard_address": "None"',
         '"torch_dist_address": "127.0.0.1:29500"',

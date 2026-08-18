@@ -223,6 +223,22 @@ def _install_dependencies(venv_python, new_checkout):
         _run(pip + ["install", "-r", Path(COMFY_DIR) / "requirements.txt"])
     if bootstrap and EXTRA_PIP_PACKAGES:
         _run(pip + ["install", "--upgrade", *EXTRA_PIP_PACKAGES])
+    if bootstrap:
+        # SageAttention T4 bodge: torch 2.11 + cu130 + the SM75 wheel.
+        # Same combo proven on Kaggle in the minimax-t4 notebook; SageAttention
+        # 2.1.2 needs the newer torch to load its kernels.
+        _run(pip + [
+            "install", "-U",
+            "torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0", "xformers==0.0.35",
+            "--index-url", "https://download.pytorch.org/whl/cu130",
+        ])
+        sage_wheel = _download_small(
+            "https://github.com/netrunner-exe/SageAttention2-Colab-Wheels/raw/main/"
+            "colab-torch-2.11.0%2Bcu130/sageattention-2.1.2-cp312-cp312-linux_x86_64.whl",
+            Path(WORK_DIR) / ".wheels" / "sageattention-2.1.2-cp312-cp312-linux_x86_64.whl",
+            min_bytes=20_000_000,
+        )
+        _run(pip + ["install", "--force-reinstall", "--no-deps", str(sage_wheel)])
     check = subprocess.run(pip + ["check"], capture_output=True, text=True)
     if check.returncode:
         print("pip check notes:\n" + (check.stdout + check.stderr).strip())
@@ -513,7 +529,7 @@ def _make_raylight_workflow(stock_workflow):
         # mmap, Ray object store GiB, dashboard, torch distributed address.
         "widgets_values": [
             "local", "minimax-h3-raylight", 2, 2, 1, 1, 1, False,
-            True, True, False, "TORCH_EFFICIENT", True, True,
+            True, True, False, "SAGE_FP16", True, True,
             0.5, "None", "127.0.0.1:29500",
         ],
     }
@@ -637,7 +653,7 @@ def _make_raylight_workflow(stock_workflow):
         "gpus": 2,
         "ulysses_degree": 2,
         "fsdp_cpu_offload": False,
-        "attention": "TORCH_EFFICIENT",
+        "attention": "SAGE_FP16",
         "fake_model_mode": bool(globals().get("USE_FAKE_MODEL_STUBS", False)),
         "int8_accumulator_mib": int(globals().get("INT8_ACCUMULATOR_MIB", 128)),
         "memory_trace": bool(globals().get("H3_MEMORY_TRACE", False)),
