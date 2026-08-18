@@ -41,6 +41,8 @@ H3_INT8_CUDA_ALLOW_UNDER_13 = globals().setdefault(
 H3_INT8_CUDA_ALLOW_UNBOUNDED = globals().setdefault(
     "H3_INT8_CUDA_ALLOW_UNBOUNDED", False
 )
+H3_MEMORY_LIMIT_GB = globals().setdefault("H3_MEMORY_LIMIT_GB", None)
+# FLOW-PRODUCED: cap-host-ram-on-kaggle
 if not isinstance(H3_INT8_CUDA_ALLOW_UNDER_13, bool):
     raise TypeError("H3_INT8_CUDA_ALLOW_UNDER_13 must be bool")
 if not isinstance(H3_INT8_CUDA_ALLOW_UNBOUNDED, bool):
@@ -68,6 +70,9 @@ os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNDER_13"] = "1" if H3_INT8_CUDA_ALLOW_UNDE
 os.environ["RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED"] = (
     "1" if H3_INT8_CUDA_ALLOW_UNBOUNDED else "0"
 )
+if H3_MEMORY_LIMIT_GB is not None:
+    os.environ["RAYLIGHT_H3_MAX_HOST_RAM_GB"] = str(float(H3_MEMORY_LIMIT_GB))
+
 
 def _default(name, value):
     globals().setdefault(name, value)
@@ -136,7 +141,7 @@ _default("CLOUDFLARED_SHA256", "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4
 _default("CLOUDFLARE_EXTRA_ARGS", [])
 
 provisioner_url = f"https://raw.githubusercontent.com/StanLukuvka/raylight/{raylight_commit}/tools/kaggle_h3_interactive.py"
-provisioner_sha256 = "da520c7db825d423c31debfde29f873aaec542e554063269da2f83a14bd15348"
+provisioner_sha256 = "5ca0efa1e3ad12403c702d9ff290901e5477d9cc3665a6fdfea87e68bcd21ac9"
 source = urllib.request.urlopen(provisioner_url, timeout=120).read()
 actual = hashlib.sha256(source).hexdigest()
 if actual != provisioner_sha256:

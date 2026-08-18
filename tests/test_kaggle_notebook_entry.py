@@ -112,6 +112,7 @@ def test_notebook_entry_refuses_unbounded_cuda_int8_without_post_gate_approval()
 
 
 def test_notebook_entry_allows_explicit_unbounded_cuda_after_gate(monkeypatch):
+    monkeypatch.delenv("RAYLIGHT_INT8_CUDA_ALLOW_UNBOUNDED", raising=False)
     namespace = {
         "RAYLIGHT_COMMIT": "1" * 40,
         "ACTION": "status",
