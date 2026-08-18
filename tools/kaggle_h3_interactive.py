@@ -832,6 +832,15 @@ def _install_host_ram_cap(venv_python: "Path | str") -> None:
     """
     import site
 
+    # H3_MEMORY_LIMIT_GB (optional, GB): an explicit cap on the host RAM that
+    # ComfyUI is allowed to see.  Propagated to the ComfyUI subprocess via the
+    # RAYLIGHT_H3_MAX_HOST_RAM_GB env var, which sitecustomize.py → cgroup_ram
+    # resolves before psutil is patched.  When unset, cgroup memory.max minus a
+    # 2 GB safety margin is used automatically.
+    h3_memory_limit_gb = globals().get("H3_MEMORY_LIMIT_GB")
+    if h3_memory_limit_gb is not None:
+        os.environ["RAYLIGHT_H3_MAX_HOST_RAM_GB"] = str(float(h3_memory_limit_gb))
+
     site_packages = site.getsitepackages()
     if not site_packages:
         print("[!] Could not find site-packages directory; skipping host RAM cap")
